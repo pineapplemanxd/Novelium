@@ -45,8 +45,8 @@ export const HistoryPage: React.FC<HistoryPageProps> = ({
   };
 
   return (
-    <div className="p-6 max-w-5xl mx-auto space-y-6">
-      <div className="flex items-center justify-between gap-4">
+    <div className="p-4 sm:p-6 max-w-5xl mx-auto space-y-5 sm:space-y-6">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight flex items-center gap-2">
             <Clock className="w-6 h-6 text-[var(--accent-hover)]" />

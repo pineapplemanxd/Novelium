@@ -48,7 +48,7 @@ export interface SourceHealthResult {
 export interface DeclarativeSourceManifest {
   id: string;
   name: string;
-  kind: "opds" | "html";
+  kind: "opds" | "html" | "auto";
   base_url: string;
   description: string;
   genres: string[];
@@ -355,7 +355,7 @@ export interface AppSettings {
   reader_line_height: number;
   reader_paragraph_spacing: number;
   reader_width: number;
-  reader_theme: "obsidian" | "paper" | "sepia" | "forest" | "custom";
+  reader_theme: "obsidian" | "amoled" | "paper" | "sepia" | "forest" | "custom";
   reader_custom_bg: string;
   reader_custom_fg: string;
   reader_custom_accent: string;
@@ -386,4 +386,49 @@ export interface ImportBookResult {
 export interface ImportBundleResult {
   novels_imported: number;
   entries_imported: number;
+}
+
+export interface GoogleDriveSyncConfigPatch {
+  enabled: boolean;
+  client_id: string;
+  client_secret_update: string | null;
+  folder_input: string;
+  sync_downloaded_books: boolean;
+  sync_settings: boolean;
+  auto_sync_on_launch: boolean;
+}
+
+export interface GoogleDriveSyncStatus {
+  enabled: boolean;
+  client_id: string;
+  has_client_secret: boolean;
+  folder_input: string;
+  folder_id: string;
+  folder_name: string | null;
+  sync_downloaded_books: boolean;
+  sync_settings: boolean;
+  auto_sync_on_launch: boolean;
+  connected: boolean;
+  connected_email: string | null;
+  token_expires_at: string | null;
+  last_sync_at: string | null;
+  last_sync_summary: string | null;
+}
+
+export interface GoogleDriveOAuthStartResult {
+  auth_url: string;
+  redirect_uri: string;
+  browser_opened: boolean;
+}
+
+export interface GoogleDriveSyncReport {
+  folder_id: string;
+  folder_name: string | null;
+  novels_merged: number;
+  library_entries_merged: number;
+  books_downloaded: number;
+  chapters_downloaded: number;
+  books_uploaded: number;
+  settings_applied: boolean;
+  synced_at: string;
 }

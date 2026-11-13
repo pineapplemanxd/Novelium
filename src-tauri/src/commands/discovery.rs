@@ -1,5 +1,4 @@
 use std::collections::HashSet;
-use std::path::Path;
 use futures::future::join_all;
 use tauri::State;
 
@@ -305,8 +304,9 @@ pub async fn get_chapter_content(
     // 1. Offline-first: read local downloaded file if available
     if ch.is_downloaded {
         if let Some(ref lp) = ch.local_path {
-            if Path::new(lp).exists() {
-                let payload = state.downloads.read_offline_chapter(lp)?;
+            let resolved = state.downloads.resolve_stored_path(lp);
+            if resolved.exists() {
+                let payload = state.downloads.read_offline_chapter(&resolved.to_string_lossy())?;
                 return Ok(ChapterContent {
                     chapter_id: ch.id.clone(),
                     novel_id,
@@ -400,8 +400,9 @@ pub async fn cache_cover_image(
     }
     if let Some(nid) = novel_id.as_deref().filter(|s| !s.trim().is_empty()) {
         if let Some(existing) = state.db.get_novel(nid)?.and_then(|n| n.local_cover_path) {
-            if Path::new(&existing).exists() {
-                return Ok(Some(existing));
+            let resolved = state.downloads.resolve_stored_path(&existing);
+            if resolved.exists() {
+                return Ok(Some(resolved.to_string_lossy().to_string()));
             }
         }
         return Ok(state.downloads.cache_novel_cover(nid, clean_url).await);

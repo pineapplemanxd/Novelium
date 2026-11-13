@@ -306,9 +306,9 @@ export const NovelDetailsPage: React.FC<NovelDetailsPageProps> = ({
   };
 
   return (
-    <div className="p-6 max-w-6xl mx-auto space-y-6">
+    <div className="p-4 sm:p-6 max-w-6xl mx-auto space-y-5 sm:space-y-6">
       {/* Top Bar */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <button
           type="button"
           onClick={onBack}
@@ -332,8 +332,8 @@ export const NovelDetailsPage: React.FC<NovelDetailsPageProps> = ({
       </div>
 
       {/* Hero Section */}
-      <div className="flex flex-col md:flex-row gap-6 p-6 rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-surface)]">
-        <div className="w-44 sm:w-52 aspect-[2/3] rounded-xl overflow-hidden shadow-lg shrink-0 mx-auto md:mx-0">
+      <div className="flex flex-col md:flex-row gap-5 sm:gap-6 p-4 sm:p-6 rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-surface)]">
+        <div className="w-36 sm:w-48 md:w-52 aspect-[2/3] rounded-xl overflow-hidden shadow-lg shrink-0 mx-auto md:mx-0">
           <CoverImage
             title={novel.title}
             author={novel.author}

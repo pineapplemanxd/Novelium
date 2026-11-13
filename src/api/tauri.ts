@@ -1,7 +1,8 @@
-import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { open, save } from "@tauri-apps/plugin-dialog";
+import { open as tauriOpen, save as tauriSave } from "@tauri-apps/plugin-dialog";
+import { IS_IOS } from "../utils/format";
 import type {
   AppSettings,
   Bookmark,
@@ -12,6 +13,10 @@ import type {
   DiscoveryPage,
   DiscoveryQuery,
   DownloadTask,
+  GoogleDriveOAuthStartResult,
+  GoogleDriveSyncConfigPatch,
+  GoogleDriveSyncReport,
+  GoogleDriveSyncStatus,
   Highlight,
   HomeDashboardData,
   ImportBookResult,
@@ -33,6 +38,30 @@ import type {
 
 export function isTauriEnv(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
+
+const TAURI_UNAVAILABLE_ERROR =
+  "Novelium native Tauri runtime is unavailable in plain browser preview.";
+
+function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  if (!isTauriEnv()) {
+    return Promise.reject(new Error(TAURI_UNAVAILABLE_ERROR));
+  }
+  return tauriInvoke<T>(cmd, args);
+}
+
+function open(options?: Parameters<typeof tauriOpen>[0]): ReturnType<typeof tauriOpen> {
+  if (!isTauriEnv()) {
+    return Promise.reject(new Error(TAURI_UNAVAILABLE_ERROR));
+  }
+  return tauriOpen(options);
+}
+
+function save(options?: Parameters<typeof tauriSave>[0]): ReturnType<typeof tauriSave> {
+  if (!isTauriEnv()) {
+    return Promise.reject(new Error(TAURI_UNAVAILABLE_ERROR));
+  }
+  return tauriSave(options);
 }
 
 export function resolveCoverSrc(
@@ -219,6 +248,8 @@ export const api = {
   deleteDownloadedNovel: (novelId: string) =>
     invoke<number>("delete_downloaded_novel", { novelId }),
   getStorageStats: () => invoke<StorageStats>("get_storage_stats"),
+  pauseActiveDownloads: () =>
+    isTauriEnv() ? invoke<number>("pause_active_downloads") : Promise.resolve(0),
 
   // Import / Export / Backup
   importLocalBook: (filePath: string) =>
@@ -239,36 +270,79 @@ export const api = {
   readLocalImageDataUrl: (path: string) =>
     invoke<string>("read_local_image_data_url", { path }),
 
+  // Google Drive Cloud Sync
+  getGdriveSyncStatus: () =>
+    invoke<GoogleDriveSyncStatus>("get_gdrive_sync_status"),
+  saveGdriveSyncConfig: (patch: GoogleDriveSyncConfigPatch) =>
+    invoke<GoogleDriveSyncStatus>("save_gdrive_sync_config", { patch }),
+  startGdriveOAuth: () =>
+    invoke<GoogleDriveOAuthStartResult>("start_gdrive_oauth"),
+  completeGdriveOAuthManual: (callbackInput: string) =>
+    invoke<GoogleDriveSyncStatus>("complete_gdrive_oauth_manual", { callbackInput }),
+  cancelGdriveOAuth: () => invoke<void>("cancel_gdrive_oauth"),
+  disconnectGdrive: () =>
+    invoke<GoogleDriveSyncStatus>("disconnect_gdrive"),
+  verifyGdriveFolder: () =>
+    invoke<GoogleDriveSyncStatus>("verify_gdrive_folder"),
+  syncWithGdrive: () =>
+    invoke<GoogleDriveSyncReport>("sync_with_gdrive"),
+
   // Events & Native Window/Dialogs
+  onGdriveSyncUpdated: (cb: (status: GoogleDriveSyncStatus) => void): Promise<UnlistenFn> => {
+    if (!isTauriEnv()) return Promise.resolve(() => {});
+    return listen<GoogleDriveSyncStatus>("gdrive-sync-updated", (event) => cb(event.payload));
+  },
+  onGdriveOAuthError: (cb: (message: string) => void): Promise<UnlistenFn> => {
+    if (!isTauriEnv()) return Promise.resolve(() => {});
+    return listen<string>("gdrive-oauth-error", (event) => cb(event.payload));
+  },
   onDownloadUpdated: (cb: (task: DownloadTask) => void): Promise<UnlistenFn> => {
     if (!isTauriEnv()) return Promise.resolve(() => {});
     return listen<DownloadTask>("download-updated", (event) => cb(event.payload));
   },
   toggleFullscreen: async (): Promise<boolean> => {
+    if (IS_IOS) {
+      return false;
+    }
     if (!isTauriEnv()) {
-      if (!document.fullscreenElement) {
-        await document.documentElement.requestFullscreen?.();
-        return true;
-      } else {
-        await document.exitFullscreen?.();
+      try {
+        if (!document.fullscreenElement) {
+          await document.documentElement.requestFullscreen?.();
+          return true;
+        } else {
+          await document.exitFullscreen?.();
+          return false;
+        }
+      } catch {
         return false;
       }
     }
-    const win = getCurrentWindow();
-    const current = await win.isFullscreen();
-    await win.setFullscreen(!current);
-    return !current;
+    try {
+      const win = getCurrentWindow();
+      const current = await win.isFullscreen();
+      await win.setFullscreen(!current);
+      return !current;
+    } catch {
+      return false;
+    }
   },
   setFullscreen: async (fs: boolean): Promise<void> => {
-    if (!isTauriEnv()) return;
-    await getCurrentWindow().setFullscreen(fs);
+    if (IS_IOS || !isTauriEnv()) return;
+    try {
+      await getCurrentWindow().setFullscreen(fs);
+    } catch {
+      // ignore unsupported mobile platforms
+    }
   },
   pickBookFiles: async (): Promise<string[]> => {
     const selected = await open({
       multiple: true,
-      title: "Import Novels (EPUB, TXT, HTML)",
+      title: "Import Books (EPUB, PDF, FB2, MD, TXT, HTML)",
       filters: [
-        { name: "Ebooks & Documents", extensions: ["epub", "txt", "html", "htm", "xhtml"] },
+        {
+          name: "Ebooks & Documents",
+          extensions: ["epub", "pdf", "fb2", "md", "markdown", "txt", "text", "html", "htm", "xhtml"],
+        },
       ],
     });
     if (!selected) return [];

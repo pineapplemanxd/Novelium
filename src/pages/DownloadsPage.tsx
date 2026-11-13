@@ -7,12 +7,14 @@ import {
   RefreshCw,
   RotateCcw,
   Trash2,
+  Upload,
   X,
 } from "lucide-react";
 import { api, extractErrorMessage } from "../api/tauri";
 import { CoverImage } from "../components/CoverImage";
 import type { DownloadTask, StorageStats } from "../types/novel";
 import { formatBytes, formatRelativeDate, formatSpeed } from "../utils/format";
+import { importBookFilesFromPicker } from "../utils/importBooks";
 
 interface DownloadsPageProps {
   onOpenNovel: (novelId: string) => void;
@@ -26,6 +28,7 @@ export const DownloadsPage: React.FC<DownloadsPageProps> = ({
   const [tasks, setTasks] = useState<DownloadTask[]>([]);
   const [storage, setStorage] = useState<StorageStats | null>(null);
   const [loading, setLoading] = useState(true);
+  const [importing, setImporting] = useState(false);
 
   const loadAll = async () => {
     setLoading(true);
@@ -74,6 +77,9 @@ export const DownloadsPage: React.FC<DownloadsPageProps> = ({
     }
   };
 
+  const handleImportFiles = () =>
+    importBookFilesFromPicker(onNotify, loadAll, setImporting, "offline downloads");
+
   const statusBadge = (status: DownloadTask["status"]) => {
     switch (status) {
       case "downloading":
@@ -90,7 +96,7 @@ export const DownloadsPage: React.FC<DownloadsPageProps> = ({
   };
 
   return (
-    <div className="p-6 max-w-6xl mx-auto space-y-8">
+    <div className="p-4 sm:p-6 max-w-6xl mx-auto space-y-6 sm:space-y-8">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Downloads & Offline Storage</h1>
@@ -98,14 +104,26 @@ export const DownloadsPage: React.FC<DownloadsPageProps> = ({
             Manage queued chapter downloads and local disk usage. Deleting offline files preserves reading progress.
           </p>
         </div>
-        <button
-          type="button"
-          onClick={loadAll}
-          className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium border border-[var(--border-subtle)] bg-[var(--bg-surface)] hover:bg-[var(--bg-elevated)] self-start"
-        >
-          <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
-          Refresh
-        </button>
+        <div className="flex flex-wrap items-center gap-2 self-start">
+          <button
+            type="button"
+            onClick={handleImportFiles}
+            disabled={importing}
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-medium text-white disabled:opacity-60"
+            style={{ backgroundColor: "var(--accent)" }}
+          >
+            <Upload className="w-3.5 h-3.5" />
+            {importing ? "Importing..." : "Add Book (EPUB, PDF, ...)"}
+          </button>
+          <button
+            type="button"
+            onClick={loadAll}
+            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium border border-[var(--border-subtle)] bg-[var(--bg-surface)] hover:bg-[var(--bg-elevated)]"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
+            Refresh
+          </button>
+        </div>
       </div>
 
       {/* Storage Overview Card */}
@@ -120,7 +138,7 @@ export const DownloadsPage: React.FC<DownloadsPageProps> = ({
                 <div className="text-sm font-semibold">
                   {formatBytes(storage.total_bytes)} Used Locally
                 </div>
-                <div className="text-xs text-[var(--text-muted)] truncate max-w-md">
+                <div className="text-xs text-[var(--text-muted)] truncate max-w-[calc(100vw-6rem)] sm:max-w-md">
                   {storage.download_dir}
                 </div>
               </div>
@@ -294,8 +312,17 @@ export const DownloadsPage: React.FC<DownloadsPageProps> = ({
       <section className="space-y-3">
         <h2 className="text-base font-semibold">Storage Used Per Novel</h2>
         {!storage || storage.novels.length === 0 ? (
-          <div className="p-8 text-center rounded-xl border border-dashed border-[var(--border-strong)] text-xs text-[var(--text-muted)]">
-            No novels stored offline yet.
+          <div className="p-8 text-center rounded-xl border border-dashed border-[var(--border-strong)] text-xs text-[var(--text-muted)] space-y-3">
+            <p>No novels stored offline yet. Add local EPUB, PDF, FB2, MD, TXT, or HTML files for offline reading.</p>
+            <button
+              type="button"
+              onClick={handleImportFiles}
+              disabled={importing}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-[var(--bg-elevated)] border border-[var(--border-subtle)] hover:border-[var(--accent)] text-[var(--text-primary)]"
+            >
+              <Upload className="w-3.5 h-3.5" />
+              {importing ? "Importing..." : "Add Book from File"}
+            </button>
           </div>
         ) : (
           <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] divide-y divide-[var(--border-subtle)] overflow-hidden">

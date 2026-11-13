@@ -76,3 +76,8 @@ pub async fn delete_downloaded_novel(
 pub async fn get_storage_stats(state: State<'_, AppState>) -> AppResult<StorageStats> {
     state.downloads.get_storage_stats()
 }
+
+#[tauri::command]
+pub async fn pause_active_downloads(state: State<'_, AppState>) -> AppResult<usize> {
+    Ok(state.downloads.pause_all_active().await)
+}

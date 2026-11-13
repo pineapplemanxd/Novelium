@@ -3,6 +3,7 @@ import {
   Activity,
   BookOpen,
   CheckCircle2,
+  Cloud,
   Database,
   Download,
   FolderOpen,
@@ -19,7 +20,8 @@ import {
   XCircle,
 } from "lucide-react";
 import { api, extractErrorMessage } from "../api/tauri";
-import { APP_LANGUAGES, MOD_KEY } from "../utils/format";
+import { GoogleDriveSyncSection } from "../components/GoogleDriveSyncSection";
+import { APP_LANGUAGES, IS_IOS, MOD_KEY } from "../utils/format";
 import type {
   AppSettings,
   DeclarativeSourceManifest,
@@ -34,7 +36,7 @@ interface SettingsPageProps {
   onNotify: (msg: string, isError?: boolean) => void;
 }
 
-type SettingsTab = "appearance" | "reader" | "downloads" | "sources" | "general";
+type SettingsTab = "appearance" | "reader" | "downloads" | "sources" | "sync" | "general";
 
 const SIDEBAR_LABELS: Record<string, string> = {
   home: "Home",
@@ -58,11 +60,12 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
   const [diagnostics, setDiagnostics] = useState<DiagnosticsInfo | null>(null);
 
   // Custom Source Creator modal/drawer
-  const [showAddSource, setShowAddSource] = useState(false);
-  const [customManifest, setCustomManifest] = useState<DeclarativeSourceManifest>({
+  const emptyManifest = (
+    kind: DeclarativeSourceManifest["kind"] = "opds",
+  ): DeclarativeSourceManifest => ({
     id: "",
     name: "",
-    kind: "opds",
+    kind,
     base_url: "",
     description: "",
     genres: ["Fiction"],
@@ -78,9 +81,15 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
     chapter_list_selector: "",
     chapter_title_selector: "",
     chapter_link_selector: "",
-    content_selector: "article",
+    content_selector: kind === "auto" ? "" : "article",
     remove_selectors: [],
+    language: "",
   });
+
+  const [showAddSource, setShowAddSource] = useState(false);
+  const [customManifest, setCustomManifest] = useState<DeclarativeSourceManifest>(() =>
+    emptyManifest("opds"),
+  );
 
   const loadSources = async () => {
     try {
@@ -148,10 +157,34 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
   const handleInstallCustomSource = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      await api.installCustomSource(customManifest);
+      const opt = (v?: string) => {
+        const t = v?.trim();
+        return t ? t : undefined;
+      };
+      const payload: DeclarativeSourceManifest = {
+        ...customManifest,
+        browse_url_template: opt(customManifest.browse_url_template),
+        search_url_template: opt(customManifest.search_url_template),
+        feed_url: opt(customManifest.feed_url),
+        novel_list_selector: opt(customManifest.novel_list_selector),
+        title_selector: opt(customManifest.title_selector),
+        author_selector: opt(customManifest.author_selector),
+        cover_selector: opt(customManifest.cover_selector),
+        link_selector: opt(customManifest.link_selector),
+        description_selector: opt(customManifest.description_selector),
+        chapter_list_selector: opt(customManifest.chapter_list_selector),
+        chapter_title_selector: opt(customManifest.chapter_title_selector),
+        chapter_link_selector: opt(customManifest.chapter_link_selector),
+        content_selector: opt(customManifest.content_selector),
+        language: opt(customManifest.language),
+      };
+      const installed = await api.installCustomSource(payload);
       setShowAddSource(false);
+      setCustomManifest(emptyManifest("opds"));
       await loadSources();
-      onNotify(`Installed custom source "${customManifest.name}"`);
+      onNotify(
+        `Installed custom source "${installed?.name || customManifest.name || customManifest.base_url}"`,
+      );
     } catch (err) {
       onNotify(extractErrorMessage(err), true);
     }
@@ -206,6 +239,12 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
       const path = await api.pickOpenJsonFile();
       if (!path) return;
       const res = await api.importLibraryJson(path);
+      if (typeof api.getSettings === "function") {
+        const restored = await api.getSettings().catch(() => null);
+        if (restored) {
+          onUpdateSettings(restored);
+        }
+      }
       onNotify(`Imported ${res.novels_imported} novel(s) and ${res.entries_imported} library entries`);
     } catch (e) {
       onNotify(extractErrorMessage(e), true);
@@ -223,8 +262,8 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
   };
 
   return (
-    <div className="p-6 max-w-5xl mx-auto space-y-6">
-      <div className="flex items-center justify-between">
+    <div className="p-4 sm:p-6 max-w-5xl mx-auto space-y-6">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Settings</h1>
           <p className="text-sm text-[var(--text-secondary)] mt-0.5">
@@ -249,6 +288,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
             ["reader", "Reader", BookOpen],
             ["downloads", "Downloads", Download],
             ["sources", "Sources", Globe],
+            ["sync", "Cloud Sync", Cloud],
             ["general", "General & Backups", Sliders],
           ] as [SettingsTab, string, React.ElementType][]
         ).map(([id, label, Icon]) => (
@@ -414,6 +454,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
                 className="w-full px-3 py-2 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)]"
               >
                 <option value="obsidian">Obsidian Dark</option>
+                <option value="amoled">AMOLED Pure Black</option>
                 <option value="paper">Paper Light</option>
                 <option value="sepia">Warm Sepia</option>
                 <option value="forest">Forest Night</option>
@@ -619,21 +660,28 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
             <label className="text-xs font-medium text-[var(--text-secondary)]">
               Offline Download Location
             </label>
-            <div className="flex gap-2">
+            <div className="flex flex-col sm:flex-row gap-2">
               <input
                 readOnly
                 value={settings.download_dir}
-                className="flex-1 px-3 py-2 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-xs text-[var(--text-secondary)]"
+                className="flex-1 min-w-0 px-3 py-2 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-xs text-[var(--text-secondary)]"
               />
-              <button
-                type="button"
-                onClick={handlePickDownloadDir}
-                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-medium border border-[var(--border-subtle)] bg-[var(--bg-elevated)] hover:border-[var(--accent)]"
-              >
-                <FolderOpen className="w-3.5 h-3.5" />
-                Change...
-              </button>
+              {!IS_IOS && (
+                <button
+                  type="button"
+                  onClick={handlePickDownloadDir}
+                  className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-medium border border-[var(--border-subtle)] bg-[var(--bg-elevated)] hover:border-[var(--accent)] shrink-0"
+                >
+                  <FolderOpen className="w-3.5 h-3.5" />
+                  Change...
+                </button>
+              )}
             </div>
+            {IS_IOS && (
+              <p className="text-[11px] text-[var(--text-muted)]">
+                On iOS & iPadOS, downloaded novels and imported books are stored persistently inside Novelium&apos;s sandboxed Application Support container.
+              </p>
+            )}
           </div>
 
           <div className="space-y-1.5 max-w-sm text-xs">
@@ -669,18 +717,36 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
               <ShieldCheck className="w-5 h-5 text-emerald-400 shrink-0 mt-0.5" />
               <div className="text-xs text-[var(--text-secondary)]">
                 <strong className="text-[var(--text-primary)]">Respectful Source Engine:</strong>{" "}
-                All sources enforce <code className="px-1 rounded bg-[var(--bg-elevated)]">robots.txt</code> rules, per-domain rate limits, and never bypass authentication or DRM. Add new OPDS 1.2 or HTML selector sources without recompiling Novelium.
+                All sources apply per-domain rate limits and never bypass authentication, CAPTCHAs, or DRM. Add any URL for automatic parsing, or configure an OPDS 1.2 / CSS-selector source.
               </div>
             </div>
-            <button
-              type="button"
-              onClick={() => setShowAddSource(!showAddSource)}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-medium text-white shrink-0"
-              style={{ backgroundColor: "var(--accent)" }}
-            >
-              <Plus className="w-3.5 h-3.5" />
-              Add Custom Source
-            </button>
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={() => {
+                  setCustomManifest(emptyManifest("auto"));
+                  setShowAddSource(true);
+                }}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-medium border border-[var(--accent-border)] bg-[var(--accent-soft)] text-[var(--accent-bright)]"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                Add Source by URL
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (!showAddSource) {
+                    setCustomManifest(emptyManifest("opds"));
+                  }
+                  setShowAddSource(!showAddSource);
+                }}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-medium text-white shrink-0"
+                style={{ backgroundColor: "var(--accent)" }}
+              >
+                <Plus className="w-3.5 h-3.5" />
+                Add Custom Source
+              </button>
+            </div>
           </div>
 
           {showAddSource && (
@@ -688,20 +754,32 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
               onSubmit={handleInstallCustomSource}
               className="rounded-2xl border border-[var(--accent-border)] bg-[var(--bg-surface)] p-5 space-y-4"
             >
-              <h3 className="text-sm font-semibold">Install Custom Declarative Source (OPDS / HTML)</h3>
+              <h3 className="text-sm font-semibold">
+                {customManifest.kind === "auto"
+                  ? "Add Website or Feed URL (Auto-Parsed)"
+                  : "Install Custom Declarative Source (OPDS / HTML)"}
+              </h3>
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
                 <input
-                  required
+                  required={customManifest.kind !== "auto"}
                   value={customManifest.id}
                   onChange={(e) => setCustomManifest({ ...customManifest, id: e.target.value })}
-                  placeholder="ID (e.g. my_calibre)"
+                  placeholder={
+                    customManifest.kind === "auto"
+                      ? "ID (optional, auto from URL)"
+                      : "ID (e.g. my_calibre)"
+                  }
                   className="px-3 py-2 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)]"
                 />
                 <input
-                  required
+                  required={customManifest.kind !== "auto"}
                   value={customManifest.name}
                   onChange={(e) => setCustomManifest({ ...customManifest, name: e.target.value })}
-                  placeholder="Display Name"
+                  placeholder={
+                    customManifest.kind === "auto"
+                      ? "Display Name (optional)"
+                      : "Display Name"
+                  }
                   className="px-3 py-2 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)]"
                 />
                 <select
@@ -709,11 +787,12 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
                   onChange={(e) =>
                     setCustomManifest({
                       ...customManifest,
-                      kind: e.target.value as "opds" | "html",
+                      kind: e.target.value as DeclarativeSourceManifest["kind"],
                     })
                   }
                   className="px-3 py-2 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)]"
                 >
+                  <option value="auto">Auto-Parse URL (Smart Detector)</option>
                   <option value="opds">OPDS 1.2 Atom Feed</option>
                   <option value="html">HTML CSS-Selector Source</option>
                 </select>
@@ -731,12 +810,53 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
                   onChange={(e) =>
                     setCustomManifest({ ...customManifest, description: e.target.value })
                   }
-                  placeholder="Short description"
+                  placeholder="Short description (optional)"
                   className="px-3 py-2 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)]"
                 />
               </div>
 
-              {customManifest.kind === "opds" ? (
+              {customManifest.kind === "auto" ? (
+                <div className="space-y-2">
+                  <p className="text-[11px] text-[var(--text-secondary)]">
+                    Novelium will automatically detect OPDS/RSS feeds or web novel lists, metadata, chapters, and readable content from the URL.
+                  </p>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+                    <input
+                      value={customManifest.browse_url_template || ""}
+                      onChange={(e) =>
+                        setCustomManifest({
+                          ...customManifest,
+                          browse_url_template: e.target.value,
+                        })
+                      }
+                      placeholder="Browse URL override ({page}, optional)"
+                      className="px-3 py-2 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)]"
+                    />
+                    <input
+                      value={customManifest.search_url_template || ""}
+                      onChange={(e) =>
+                        setCustomManifest({
+                          ...customManifest,
+                          search_url_template: e.target.value,
+                        })
+                      }
+                      placeholder="Search URL override ({query}, optional)"
+                      className="px-3 py-2 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)]"
+                    />
+                    <input
+                      value={customManifest.language || ""}
+                      onChange={(e) =>
+                        setCustomManifest({
+                          ...customManifest,
+                          language: e.target.value,
+                        })
+                      }
+                      placeholder="Language code (e.g. en, optional)"
+                      className="px-3 py-2 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)]"
+                    />
+                  </div>
+                </div>
+              ) : customManifest.kind === "opds" ? (
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
                   <input
                     required
@@ -987,6 +1107,14 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
         </div>
       )}
 
+      {/* Cloud Sync (Google Drive OAuth) */}
+      {tab === "sync" && (
+        <GoogleDriveSyncSection
+          onSettingsSynced={onUpdateSettings}
+          onNotify={onNotify}
+        />
+      )}
+
       {/* General, Backups, Shortcuts & Diagnostics */}
       {tab === "general" && (
         <div className="space-y-6">
@@ -1046,6 +1174,14 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
               >
                 <Upload className="w-3.5 h-3.5" />
                 Import / Restore Backup (.json)
+              </button>
+              <button
+                type="button"
+                onClick={() => setTab("sync")}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-medium border border-[var(--accent-border)] bg-[var(--accent-soft)] hover:border-[var(--accent)] text-[var(--accent-hover)]"
+              >
+                <Cloud className="w-3.5 h-3.5" />
+                Google Drive Sync Settings…
               </button>
             </div>
           </div>

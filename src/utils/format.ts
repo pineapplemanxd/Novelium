@@ -1,3 +1,5 @@
+import { useEffect, useState } from "react";
+
 export function formatBytes(bytes: number): string {
   if (!bytes || bytes <= 0) return "0 B";
   const units = ["B", "KB", "MB", "GB"];
@@ -49,11 +51,49 @@ export function estimateReadingMinutes(words: number): number {
   return Math.max(1, Math.round(words / 240));
 }
 
+export function detectIosPlatform(
+  nav?: Partial<Pick<Navigator, "platform" | "userAgent" | "maxTouchPoints">>,
+): boolean {
+  const n = nav ?? (typeof navigator !== "undefined" ? navigator : undefined);
+  if (!n) return false;
+  const sig = `${n.platform || ""} ${n.userAgent || ""}`;
+  if (/iPhone|iPad|iPod/i.test(sig)) return true;
+  // iPadOS WKWebView/Safari in desktop-class mode identifies as MacIntel with multi-touch points.
+  return /Mac/i.test(n.platform || "") && (n.maxTouchPoints ?? 0) > 1;
+}
+
+export const IS_IOS = detectIosPlatform();
+
 export const IS_MAC =
   typeof navigator !== "undefined" &&
   /Mac|iPhone|iPad|iPod/i.test(navigator.platform || navigator.userAgent);
 
+export const IS_MAC_DESKTOP = IS_MAC && !IS_IOS;
+
 export const MOD_KEY = IS_MAC ? "⌘" : "Ctrl+";
+
+export type DeviceLayout = "phone" | "tablet" | "desktop";
+
+export function getDeviceLayout(width: number, isIos = IS_IOS): DeviceLayout {
+  if (width < 768) return "phone";
+  if (isIos) return "tablet";
+  return "desktop";
+}
+
+export function useDeviceLayout(): DeviceLayout {
+  const [layout, setLayout] = useState<DeviceLayout>(() =>
+    getDeviceLayout(typeof window !== "undefined" ? window.innerWidth : 1280),
+  );
+
+  useEffect(() => {
+    const update = () => setLayout(getDeviceLayout(window.innerWidth));
+    update();
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
+  }, []);
+
+  return layout;
+}
 
 export interface AnnotationSwatch {
   id: string;
@@ -102,6 +142,7 @@ export const OPEN_BOOK_SOURCE_IDS = [
   "standardebooks",
   "archive_org",
   "wikisource",
+  "openlibrary",
 ] as const;
 
 export function sourceLabel(sourceId: string): string {
@@ -114,6 +155,8 @@ export function sourceLabel(sourceId: string): string {
       return "Wikisource";
     case "archive_org":
       return "Internet Archive";
+    case "openlibrary":
+      return "Open Library";
     case "fanmtl":
       return "FanMTL";
     case "wuxiabox":
@@ -148,4 +191,33 @@ export function libraryStatusLabel(status: string): string {
     default:
       return status;
   }
+}
+
+export function extractGoogleDriveFolderId(input: string): string | null {
+  const trimmed = input.trim();
+  if (!trimmed) return null;
+  const idPattern = /^[A-Za-z0-9_-]{10,128}$/;
+
+  if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
+    try {
+      const parsed = new URL(trimmed);
+      const host = parsed.hostname.toLowerCase();
+      if (!host.endsWith("drive.google.com") && !host.endsWith("docs.google.com")) {
+        return null;
+      }
+      const segments = parsed.pathname.split("/").filter(Boolean);
+      const foldersIdx = segments.indexOf("folders");
+      if (foldersIdx !== -1 && foldersIdx + 1 < segments.length) {
+        const candidate = segments[foldersIdx + 1];
+        if (idPattern.test(candidate)) return candidate;
+      }
+      const qId = parsed.searchParams.get("id");
+      if (qId && idPattern.test(qId)) return qId;
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+  return idPattern.test(trimmed) ? trimmed : null;
 }

@@ -149,7 +149,7 @@ export const DiscoverPage: React.FC<DiscoverPageProps> = ({
   );
 
   return (
-    <div className="p-6 max-w-[1440px] mx-auto space-y-5">
+    <div className="p-4 sm:p-6 max-w-[1440px] mx-auto space-y-5">
       <div className="flex flex-col md:flex-row md:items-end justify-between gap-4">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">
@@ -223,8 +223,8 @@ export const DiscoverPage: React.FC<DiscoverPageProps> = ({
           ))}
         </div>
 
-        <div className="flex items-center gap-2">
-          <SlidersHorizontal className="w-3.5 h-3.5 text-[var(--text-muted)]" />
+        <div className="flex flex-wrap items-center gap-2">
+          <SlidersHorizontal className="w-3.5 h-3.5 text-[var(--text-muted)] hidden sm:block" />
           <select
             aria-label="Sort novels"
             value={sort}

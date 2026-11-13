@@ -26,88 +26,100 @@ impl ArchiveOrgSource {
 
     async fn ensure_parsed(&self, identifier: &str) -> AppResult<CachedParsedBook> {
         let novel_id = make_novel_id(self.id(), identifier);
-        if let Some(cached) = self.cache.get(&novel_id) {
-            if !cached.chapters.is_empty() {
-                return Ok(cached);
-            }
-        }
-
-        let lock = self.cache.novel_lock(&novel_id).await;
-        let _guard = lock.lock().await;
-        if let Some(cached) = self.cache.get(&novel_id) {
-            if !cached.chapters.is_empty() {
-                return Ok(cached);
-            }
-        }
-
-        let meta_url = format!("https://archive.org/metadata/{identifier}");
-        let meta: IaMetadataResp = self.http.get_json(&meta_url).await?;
-
-        const MAX_EPUB_BYTES: u64 = 25 * 1024 * 1024;
-        const MAX_TXT_BYTES: u64 = 15 * 1024 * 1024;
-
-        let mut epub_candidates: Vec<(&IaFile, u64)> = meta
-            .files
-            .iter()
-            .filter(|f| {
-                let low = f.name.to_ascii_lowercase();
-                low.ends_with(".epub")
-                    && !low.contains("_encrypted")
-                    && f.private.as_deref() != Some("true")
-            })
-            .map(|f| (f, f.size_bytes().unwrap_or(0)))
-            .filter(|(_, sz)| *sz <= MAX_EPUB_BYTES)
-            .collect();
-        epub_candidates.sort_by_key(|(_, sz)| *sz);
-
-        let mut txt_candidates: Vec<(&IaFile, u64)> = meta
-            .files
-            .iter()
-            .filter(|f| {
-                let low = f.name.to_ascii_lowercase();
-                low.ends_with(".txt")
-                    && !low.ends_with("_files.xml")
-                    && f.private.as_deref() != Some("true")
-            })
-            .map(|f| (f, f.size_bytes().unwrap_or(0)))
-            .filter(|(_, sz)| *sz <= MAX_TXT_BYTES)
-            .collect();
-        // Prefer clean non-djvu plain text first, then smallest _djvu.txt
-        txt_candidates.sort_by_key(|(f, sz)| {
-            let is_djvu = f.name.to_ascii_lowercase().ends_with("_djvu.txt");
-            (if is_djvu { 1u8 } else { 0u8 }, *sz)
-        });
-
-        let mut parsed = None;
-        if let Some((f, _)) = epub_candidates.first() {
-            let dl_url = build_download_url(identifier, &f.name)?;
-            let bytes = self.http.get_bytes(&dl_url).await?;
-            if let Ok(book) = parse_epub_bytes(&bytes, identifier) {
-                if !book.chapters.is_empty() {
-                    parsed = Some(book);
-                }
-            }
-        }
-        if parsed.is_none() {
-            if let Some((f, _)) = txt_candidates.first() {
-                let dl_url = build_download_url(identifier, &f.name)?;
-                let bytes = self.http.get_bytes(&dl_url).await?;
-                parsed = Some(parse_txt_bytes(&bytes, identifier)?);
-            }
-        }
-
-        let parsed = parsed.ok_or_else(|| {
-            AppError::NotFound(format!(
-                "No readable open EPUB (<=25MB) or TXT file available for Internet Archive item {identifier}"
-            ))
-        })?;
-
-        self.cache.put(&novel_id, &parsed)
+        ensure_ia_item_parsed(&self.http, &self.cache, "https://archive.org", &novel_id, identifier)
+            .await
     }
 }
 
-fn build_download_url(identifier: &str, fname: &str) -> AppResult<String> {
-    let mut url = url::Url::parse("https://archive.org/download")?;
+pub(crate) async fn ensure_ia_item_parsed(
+    http: &SourceHttpClient,
+    cache: &ParsedBookCache,
+    ia_base_url: &str,
+    novel_id: &str,
+    identifier: &str,
+) -> AppResult<CachedParsedBook> {
+    if let Some(cached) = cache.get(novel_id) {
+        if !cached.chapters.is_empty() {
+            return Ok(cached);
+        }
+    }
+
+    let lock = cache.novel_lock(novel_id).await;
+    let _guard = lock.lock().await;
+    if let Some(cached) = cache.get(novel_id) {
+        if !cached.chapters.is_empty() {
+            return Ok(cached);
+        }
+    }
+
+    let base = ia_base_url.trim_end_matches('/');
+    let meta_url = format!("{base}/metadata/{identifier}");
+    let meta: IaMetadataResp = http.get_json(&meta_url).await?;
+
+    const MAX_EPUB_BYTES: u64 = 25 * 1024 * 1024;
+    const MAX_TXT_BYTES: u64 = 15 * 1024 * 1024;
+
+    let mut epub_candidates: Vec<(&IaFile, u64)> = meta
+        .files
+        .iter()
+        .filter(|f| {
+            let low = f.name.to_ascii_lowercase();
+            low.ends_with(".epub")
+                && !low.contains("_encrypted")
+                && f.private.as_deref() != Some("true")
+        })
+        .map(|f| (f, f.size_bytes().unwrap_or(0)))
+        .filter(|(_, sz)| *sz <= MAX_EPUB_BYTES)
+        .collect();
+    epub_candidates.sort_by_key(|(_, sz)| *sz);
+
+    let mut txt_candidates: Vec<(&IaFile, u64)> = meta
+        .files
+        .iter()
+        .filter(|f| {
+            let low = f.name.to_ascii_lowercase();
+            low.ends_with(".txt")
+                && !low.ends_with("_files.xml")
+                && f.private.as_deref() != Some("true")
+        })
+        .map(|f| (f, f.size_bytes().unwrap_or(0)))
+        .filter(|(_, sz)| *sz <= MAX_TXT_BYTES)
+        .collect();
+    // Prefer clean non-djvu plain text first, then smallest _djvu.txt
+    txt_candidates.sort_by_key(|(f, sz)| {
+        let is_djvu = f.name.to_ascii_lowercase().ends_with("_djvu.txt");
+        (if is_djvu { 1u8 } else { 0u8 }, *sz)
+    });
+
+    let mut parsed = None;
+    if let Some((f, _)) = epub_candidates.first() {
+        let dl_url = build_download_url_with_base(base, identifier, &f.name)?;
+        let bytes = http.get_bytes(&dl_url).await?;
+        if let Ok(book) = parse_epub_bytes(&bytes, identifier) {
+            if !book.chapters.is_empty() {
+                parsed = Some(book);
+            }
+        }
+    }
+    if parsed.is_none() {
+        if let Some((f, _)) = txt_candidates.first() {
+            let dl_url = build_download_url_with_base(base, identifier, &f.name)?;
+            let bytes = http.get_bytes(&dl_url).await?;
+            parsed = Some(parse_txt_bytes(&bytes, identifier)?);
+        }
+    }
+
+    let parsed = parsed.ok_or_else(|| {
+        AppError::NotFound(format!(
+            "No readable open EPUB (<=25MB) or TXT file available for Internet Archive item {identifier}"
+        ))
+    })?;
+
+    cache.put(novel_id, &parsed)
+}
+
+fn build_download_url_with_base(ia_base: &str, identifier: &str, fname: &str) -> AppResult<String> {
+    let mut url = url::Url::parse(&format!("{}/download", ia_base.trim_end_matches('/')))?;
     {
         let mut segs = url
             .path_segments_mut()
@@ -118,6 +130,11 @@ fn build_download_url(identifier: &str, fname: &str) -> AppResult<String> {
         }
     }
     Ok(url.into())
+}
+
+#[cfg(test)]
+fn build_download_url(identifier: &str, fname: &str) -> AppResult<String> {
+    build_download_url_with_base("https://archive.org", identifier, fname)
 }
 
 #[derive(Debug, Deserialize)]
@@ -224,7 +241,7 @@ fn val_to_vec(v: Option<&Value>) -> Vec<String> {
     }
 }
 
-fn normalize_ia_lang_str(raw: &str) -> Option<String> {
+pub(crate) fn normalize_ia_lang_str(raw: &str) -> Option<String> {
     let first = raw
         .split([',', ';'])
         .next()
@@ -255,6 +272,26 @@ fn normalize_ia_lang_str(raw: &str) -> Option<String> {
 fn normalize_ia_lang_val(v: Option<&Value>) -> Option<String> {
     let s = val_to_string(v);
     normalize_ia_lang_str(&s)
+}
+
+pub(crate) fn iso2_to_ia_code(code: &str) -> String {
+    match code.trim().to_ascii_lowercase().as_str() {
+        "en" => "eng".into(),
+        "pl" => "pol".into(),
+        "fr" => "fre".into(),
+        "de" => "ger".into(),
+        "es" => "spa".into(),
+        "it" => "ita".into(),
+        "pt" => "por".into(),
+        "ru" => "rus".into(),
+        "ja" => "jpn".into(),
+        "zh" => "chi".into(),
+        "id" => "ind".into(),
+        other => other
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+            .collect(),
+    }
 }
 
 fn ia_language_clause(code: &str) -> String {

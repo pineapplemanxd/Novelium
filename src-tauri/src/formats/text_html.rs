@@ -303,6 +303,19 @@ pub fn split_plain_text_into_chapters(text: &str, book_title: &str) -> Vec<Parse
             }
         });
         sections.push((sec_title, current_buf));
+    } else if sections.is_empty() {
+        let fallback_paras: Vec<String> = text
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_string)
+            .collect();
+        if !fallback_paras.is_empty() {
+            sections.push((
+                current_title.unwrap_or_else(|| book_title.to_string()),
+                fallback_paras,
+            ));
+        }
     }
 
     // If no chapter headings matched and file is huge (> 4500 words), split cleanly at ~3000-word boundaries
@@ -524,6 +537,197 @@ pub fn split_html_by_headings(body_html: &str, fallback_title: &str) -> Vec<Pars
         .collect()
 }
 
+pub fn parse_pdf_bytes(bytes: &[u8], fallback_title: &str) -> AppResult<ParsedBook> {
+    let raw = pdf_extract::extract_text_from_mem(bytes)
+        .map_err(|e| AppError::InvalidInput(format!("Failed to parse PDF: {e}")))?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::InvalidInput(
+            "PDF contains no selectable text (scanned image PDFs are not supported)".into(),
+        ));
+    }
+    let normalized = trimmed
+        .replace("\r\n", "\n")
+        .replace('\x0c', "\n\n");
+    let chapters = split_plain_text_into_chapters(&normalized, fallback_title);
+    Ok(ParsedBook {
+        title: fallback_title.to_string(),
+        author: "Unknown Author".into(),
+        description: String::new(),
+        genres: Vec::new(),
+        tags: vec!["PDF".into()],
+        rating: None,
+        language: None,
+        series: None,
+        series_index: None,
+        cover_bytes: None,
+        cover_ext: None,
+        chapters,
+    })
+}
+
+pub fn parse_markdown_bytes(bytes: &[u8], fallback_title: &str) -> AppResult<ParsedBook> {
+    let raw = String::from_utf8_lossy(bytes);
+    if raw.trim().is_empty() {
+        return Err(AppError::InvalidInput("Markdown file is empty".into()));
+    }
+    let mut html_buf = String::new();
+    let mut para_lines: Vec<String> = Vec::new();
+    let mut detected_title: Option<String> = None;
+
+    let flush_para = |lines: &mut Vec<String>, out: &mut String| {
+        if !lines.is_empty() {
+            let joined = lines.join(" ");
+            let norm = joined.split_whitespace().collect::<Vec<_>>().join(" ");
+            if !norm.is_empty() {
+                out.push_str(&format!("<p>{}</p>\n", html_escape(&norm)));
+            }
+            lines.clear();
+        }
+    };
+
+    for line in raw.lines() {
+        let t = line.trim();
+        if t.is_empty() {
+            flush_para(&mut para_lines, &mut html_buf);
+            continue;
+        }
+        if let Some(rest) = t.strip_prefix("# ") {
+            flush_para(&mut para_lines, &mut html_buf);
+            let h = rest.trim();
+            if detected_title.is_none() && !h.is_empty() {
+                detected_title = Some(h.to_string());
+            }
+            html_buf.push_str(&format!("<h1>{}</h1>\n", html_escape(h)));
+        } else if let Some(rest) = t.strip_prefix("## ") {
+            flush_para(&mut para_lines, &mut html_buf);
+            html_buf.push_str(&format!("<h2>{}</h2>\n", html_escape(rest.trim())));
+        } else if t == "---" || t == "***" {
+            flush_para(&mut para_lines, &mut html_buf);
+            html_buf.push_str("<hr />\n");
+        } else {
+            para_lines.push(t.to_string());
+        }
+    }
+    flush_para(&mut para_lines, &mut html_buf);
+
+    let title = detected_title.unwrap_or_else(|| fallback_title.to_string());
+    let chapters = split_html_by_headings(&html_buf, &title);
+    Ok(ParsedBook {
+        title,
+        author: "Unknown Author".into(),
+        description: String::new(),
+        genres: Vec::new(),
+        tags: vec!["Markdown".into()],
+        rating: None,
+        language: None,
+        series: None,
+        series_index: None,
+        cover_bytes: None,
+        cover_ext: None,
+        chapters,
+    })
+}
+
+pub fn parse_fb2_bytes(bytes: &[u8], fallback_title: &str) -> AppResult<ParsedBook> {
+    let raw = String::from_utf8_lossy(bytes);
+    let doc = roxmltree::Document::parse(&raw)?;
+    let find_text = |tag: &str| -> Option<String> {
+        doc.descendants()
+            .find(|n| n.is_element() && n.tag_name().name() == tag)
+            .and_then(|n| n.text())
+            .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|s| !s.is_empty())
+    };
+    let title = find_text("book-title").unwrap_or_else(|| fallback_title.to_string());
+    let author = doc
+        .descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "author")
+        .map(|a| {
+            let parts: Vec<&str> = ["first-name", "middle-name", "last-name", "nickname"]
+                .iter()
+                .filter_map(|tag| {
+                    a.children()
+                        .find(|c| c.is_element() && c.tag_name().name() == *tag)
+                        .and_then(|c| c.text())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                })
+                .collect();
+            parts.join(" ")
+        })
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "Unknown Author".into());
+
+    let fb2_node_text = |n: roxmltree::Node<'_, '_>| -> String {
+        n.descendants()
+            .filter(|d| d.is_text())
+            .filter_map(|d| d.text())
+            .collect::<String>()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+
+    let mut chapters = Vec::new();
+    for sec in doc
+        .descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "section")
+    {
+        // Only treat leaf/top content sections containing direct <p> elements
+        let direct_paras: Vec<String> = sec
+            .children()
+            .filter(|c| c.is_element() && c.tag_name().name() == "p")
+            .filter_map(|p| {
+                let norm = fb2_node_text(p);
+                (!norm.is_empty()).then_some(norm)
+            })
+            .collect();
+        if direct_paras.is_empty() {
+            continue;
+        }
+        let sec_title = sec
+            .children()
+            .find(|c| c.is_element() && c.tag_name().name() == "title")
+            .map(|t| {
+                t.children()
+                    .filter(|c| c.is_element())
+                    .map(fb2_node_text)
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| format!("Chapter {}", chapters.len() + 1));
+        let wc = direct_paras.iter().map(|p| count_words(p)).sum();
+        let html = paragraphs_to_html(&direct_paras);
+        chapters.push(ParsedChapter {
+            chapter_number: (chapters.len() + 1) as f64,
+            title: sec_title,
+            html,
+            paragraphs: direct_paras,
+            word_count: wc,
+        });
+    }
+    if chapters.is_empty() {
+        return Err(AppError::InvalidInput("FB2 file contained no readable chapters".into()));
+    }
+    Ok(ParsedBook {
+        title,
+        author,
+        description: String::new(),
+        genres: Vec::new(),
+        tags: vec!["FB2".into()],
+        rating: None,
+        language: find_text("lang"),
+        series: None,
+        series_index: None,
+        cover_bytes: None,
+        cover_ext: None,
+        chapters,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -610,5 +814,83 @@ End license text should be ignored.
         assert!(!html.contains("[edit]"));
         assert!(html.contains("<em>emphasis</em>"));
         assert_eq!(wc, 6);
+    }
+
+    fn build_minimal_pdf(lines: &[&str]) -> Vec<u8> {
+        let mut ops = String::from("BT /F1 12 Tf 72 720 Td ");
+        for (i, line) in lines.iter().enumerate() {
+            if i > 0 {
+                ops.push_str("0 -24 Td ");
+            }
+            let escaped = line
+                .replace('\\', "\\\\")
+                .replace('(', "\\(")
+                .replace(')', "\\)");
+            ops.push_str(&format!("({escaped}) Tj "));
+        }
+        ops.push_str("ET");
+        let stream = ops;
+        let objects = [
+            "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n".to_string(),
+            "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n".to_string(),
+            "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n".to_string(),
+            format!("4 0 obj\n<< /Length {} >>\nstream\n{stream}\nendstream\nendobj\n", stream.len()),
+            "5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n".to_string(),
+        ];
+        let mut pdf = Vec::from(&b"%PDF-1.4\n"[..]);
+        let mut offsets = Vec::new();
+        for obj in &objects {
+            offsets.push(pdf.len());
+            pdf.extend_from_slice(obj.as_bytes());
+        }
+        let xref_pos = pdf.len();
+        pdf.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes());
+        for off in offsets {
+            pdf.extend_from_slice(format!("{off:010} 00000 n \n").as_bytes());
+        }
+        pdf.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref_pos}\n%%EOF\n",
+                objects.len() + 1
+            )
+            .as_bytes(),
+        );
+        pdf
+    }
+
+    #[test]
+    fn test_parse_pdf_markdown_and_fb2_formats() {
+        let pdf_bytes = build_minimal_pdf(&[
+            "Chapter 1",
+            "",
+            "Dark harbor lights shone gently.",
+        ]);
+        let pdf_book = parse_pdf_bytes(&pdf_bytes, "Harbor PDF").unwrap();
+        assert_eq!(pdf_book.title, "Harbor PDF");
+        assert!(!pdf_book.chapters.is_empty());
+        assert!(pdf_book.chapters[0].paragraphs[0].contains("Dark harbor lights"));
+
+        let md = b"# Cloud Atlas\n\n## Chapter 1\n\nWind swept across the ridge.\n\n## Chapter 2\n\nStars emerged.";
+        let md_book = parse_markdown_bytes(md, "Fallback").unwrap();
+        assert_eq!(md_book.title, "Cloud Atlas");
+        assert_eq!(md_book.chapters.len(), 2);
+        assert_eq!(md_book.chapters[0].title, "Chapter 1");
+
+        let fb2 = br#"<?xml version="1.0" encoding="utf-8"?>
+        <FictionBook>
+          <description><title-info>
+            <author><first-name>Leo</first-name><last-name>Tolstoy</last-name></author>
+            <book-title>Short Story</book-title>
+            <lang>en</lang>
+          </title-info></description>
+          <body>
+            <section><title><p>Part One</p></title><p>Snow fell in Moscow.</p></section>
+          </body>
+        </FictionBook>"#;
+        let fb2_book = parse_fb2_bytes(fb2, "Fallback").unwrap();
+        assert_eq!(fb2_book.title, "Short Story");
+        assert_eq!(fb2_book.author, "Leo Tolstoy");
+        assert_eq!(fb2_book.chapters.len(), 1);
+        assert_eq!(fb2_book.chapters[0].title, "Part One");
     }
 }

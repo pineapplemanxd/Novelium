@@ -1,6 +1,7 @@
 pub mod archive_org;
 pub mod declarative;
 pub mod gutenberg;
+pub mod openlibrary;
 pub mod standardebooks;
 pub mod wikisource;
 
@@ -223,8 +224,19 @@ impl SourceRegistry {
         ))
     }
 
+    fn url_preset(&self, url: &str) -> Arc<dyn NovelSource> {
+        Arc::new(declarative::DeclarativeSource::new_builtin(
+            DeclarativeSourceManifest::from_url(url),
+            self.http.clone(),
+            self.book_cache.clone(),
+        ))
+    }
+
     fn builtin_sources(&self) -> Vec<Arc<dyn NovelSource>> {
-        vec![
+        // Add any website, catalog, OPDS, or RSS URL here to register and auto-parse it automatically.
+        const AUTO_SOURCE_URLS: &[&str] = &[];
+
+        let mut list: Vec<Arc<dyn NovelSource>> = vec![
             Arc::new(gutenberg::GutenbergSource::new(
                 self.http.clone(),
                 self.book_cache.clone(),
@@ -235,6 +247,10 @@ impl SourceRegistry {
                 self.book_cache.clone(),
             )),
             Arc::new(standardebooks::StandardEbooksSource::new(self.http.clone())),
+            Arc::new(openlibrary::OpenLibrarySource::new(
+                self.http.clone(),
+                self.book_cache.clone(),
+            )),
             self.html_preset(HtmlPreset {
                 id: "fanmtl",
                 name: "FanMTL",
@@ -343,7 +359,14 @@ impl SourceRegistry {
                 remove_selectors: &["script", ".ads", "div[align='center']"],
                 language: Some("en"),
             }),
-        ]
+        ];
+        for url in AUTO_SOURCE_URLS {
+            let trimmed = url.trim();
+            if !trimmed.is_empty() {
+                list.push(self.url_preset(trimmed));
+            }
+        }
+        list
     }
 
     pub fn new(
@@ -449,8 +472,9 @@ impl SourceRegistry {
     pub async fn install_custom_source(
         &self,
         db: &Database,
-        manifest: DeclarativeSourceManifest,
+        mut manifest: DeclarativeSourceManifest,
     ) -> AppResult<SourceInfo> {
+        manifest.fill_defaults_from_url()?;
         let id = manifest.id.trim().to_string();
         if id.is_empty()
             || !id
@@ -461,20 +485,7 @@ impl SourceRegistry {
                 "Source ID must be non-empty alphanumeric, '-' or '_'".into(),
             ));
         }
-        if matches!(
-            id.as_str(),
-            "gutenberg"
-                | "wikisource"
-                | "archive_org"
-                | "standardebooks"
-                | "local"
-                | "fanmtl"
-                | "wuxiabox"
-                | "nobadnovel"
-                | "wuxia_click"
-                | "hiraeth"
-                | "readnovelfull"
-        ) {
+        if id == "local" || self.builtin_sources().iter().any(|s| s.id() == id) {
             return Err(AppError::InvalidInput(
                 "Cannot overwrite built-in source ID".into(),
             ));

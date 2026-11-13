@@ -1,0 +1,24 @@
+{
+  "build": {
+    "beforeDevCommand": "npm run dev:ios"
+  },
+  "app": {
+    "security": {
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "$APPDATA/**",
+          "$APPLOCALDATA/**",
+          "$CACHE/**",
+          "$DOCUMENT/**",
+          "$TEMP/**"
+        ]
+      }
+    }
+  },
+  "bundle": {
+    "iOS": {
+      "minimumSystemVersion": "15.0"
+    }
+  }
+}

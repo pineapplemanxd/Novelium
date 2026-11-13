@@ -84,10 +84,42 @@ impl DownloadManager {
     }
 
     pub fn current_download_dir(&self) -> PathBuf {
-        self.db
-            .load_settings(&self.default_download_dir.to_string_lossy())
-            .map(|s| PathBuf::from(s.download_dir))
-            .unwrap_or_else(|_| self.default_download_dir.clone())
+        #[cfg(target_os = "ios")]
+        {
+            return self.default_download_dir.clone();
+        }
+        #[cfg(not(target_os = "ios"))]
+        {
+            self.db
+                .load_settings(&self.default_download_dir.to_string_lossy())
+                .map(|s| PathBuf::from(s.download_dir))
+                .unwrap_or_else(|_| self.default_download_dir.clone())
+        }
+    }
+
+    /// Resolves a stored offline chapter or cover path, relocating files inside
+    /// `/novels/` or `/covers/` onto `download_dir` if an app container UUID changed (iOS updates)
+    /// or metadata was imported from another device.
+    pub fn relocate_library_path(stored: &str, download_dir: &Path) -> PathBuf {
+        let direct = Path::new(stored);
+        if direct.exists() {
+            return direct.to_path_buf();
+        }
+        let normalized = stored.replace('\\', "/");
+        for marker in ["/novels/", "/covers/"] {
+            if let Some(idx) = normalized.rfind(marker) {
+                let rel = &normalized[idx + 1..];
+                let candidate = download_dir.join(rel);
+                if candidate.exists() {
+                    return candidate;
+                }
+            }
+        }
+        direct.to_path_buf()
+    }
+
+    pub fn resolve_stored_path(&self, stored: &str) -> PathBuf {
+        Self::relocate_library_path(stored, &self.current_download_dir())
     }
 
     pub fn safe_id(id: &str) -> String {
@@ -497,6 +529,21 @@ impl DownloadManager {
         Err(AppError::NotFound(format!("Active download task {task_id} not found")))
     }
 
+    /// Pauses all actively running/queued download tasks (e.g. before mobile app suspension).
+    pub async fn pause_all_active(&self) -> usize {
+        let active_ids: Vec<String> = {
+            let controls = self.controls.lock().await;
+            controls.keys().cloned().collect()
+        };
+        let mut paused = 0usize;
+        for tid in active_ids {
+            if self.pause_task(&tid).await.is_ok() {
+                paused += 1;
+            }
+        }
+        paused
+    }
+
     pub async fn resume_task(&self, task_id: &str) -> AppResult<()> {
         {
             let controls = self.controls.lock().await;
@@ -576,7 +623,7 @@ impl DownloadManager {
         let paths = self.db.clear_chapters_download_flags(chapter_ids)?;
         let mut removed = 0usize;
         for p in paths {
-            let path = Path::new(&p);
+            let path = self.resolve_stored_path(&p);
             if path.exists() && std::fs::remove_file(path).is_ok() {
                 removed += 1;
             }
@@ -613,7 +660,7 @@ impl DownloadManager {
         let paths = self.db.clear_novel_downloads(novel_id)?;
         let mut removed = 0usize;
         for p in paths {
-            let path = Path::new(&p);
+            let path = self.resolve_stored_path(&p);
             if path.exists() && std::fs::remove_file(path).is_ok() {
                 removed += 1;
             }
@@ -648,7 +695,8 @@ impl DownloadManager {
     }
 
     pub fn read_offline_chapter(&self, local_path: &str) -> AppResult<StoredChapterPayload> {
-        let raw = std::fs::read_to_string(local_path)?;
+        let resolved = self.resolve_stored_path(local_path);
+        let raw = std::fs::read_to_string(resolved)?;
         let payload = serde_json::from_str::<StoredChapterPayload>(&raw)?;
         Ok(payload)
     }
@@ -1136,5 +1184,27 @@ mod tests {
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].status, DownloadStatus::Paused);
         assert_eq!(list[0].speed_bytes_per_sec, 0.0);
+    }
+
+    #[test]
+    fn test_relocate_library_path_handles_container_uuid_change() {
+        let tmp = tempfile::tempdir().unwrap();
+        let new_dl_dir = tmp.path().join("Application Support/library");
+        let ch_path = DownloadManager::chapter_file_path(&new_dl_dir, "src:novel1", "ch1", 1.0);
+        std::fs::create_dir_all(ch_path.parent().unwrap()).unwrap();
+        std::fs::write(&ch_path, "{}").unwrap();
+
+        let cover_path = DownloadManager::cover_file_path(&new_dl_dir, "src:novel1", "jpg");
+        std::fs::create_dir_all(cover_path.parent().unwrap()).unwrap();
+        std::fs::write(&cover_path, "img").unwrap();
+
+        let old_ch = format!(
+            "/var/mobile/Containers/Data/Application/OLD-UUID/Library/Application Support/com.novelium.reader/library/novels/src_novel1/chapters/{}",
+            ch_path.file_name().unwrap().to_string_lossy()
+        );
+        let old_cover = "/var/mobile/Containers/Data/Application/OLD-UUID/Library/Application Support/com.novelium.reader/library/covers/src_novel1.jpg";
+
+        assert_eq!(DownloadManager::relocate_library_path(&old_ch, &new_dl_dir), ch_path);
+        assert_eq!(DownloadManager::relocate_library_path(old_cover, &new_dl_dir), cover_path);
     }
 }

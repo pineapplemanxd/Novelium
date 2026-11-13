@@ -2,6 +2,7 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import {
   estimateReadingMinutes,
+  extractGoogleDriveFolderId,
   formatBytes,
   formatDuration,
   formatNumber,
@@ -12,6 +13,8 @@ import {
 } from "../utils/format";
 import { CoverImage } from "../components/CoverImage";
 import { DiscoverPage } from "../pages/DiscoverPage";
+import { DownloadsPage } from "../pages/DownloadsPage";
+import { HomePage } from "../pages/HomePage";
 import { LibraryPage } from "../pages/LibraryPage";
 import { NovelDetailsPage } from "../pages/NovelDetailsPage";
 import { ReaderPage } from "../pages/ReaderPage";
@@ -77,6 +80,16 @@ const mockApi = vi.hoisted(() => ({
   resetSettings: vi.fn(),
   getDiagnostics: vi.fn(),
   readLocalImageDataUrl: vi.fn(),
+  getGdriveSyncStatus: vi.fn(),
+  saveGdriveSyncConfig: vi.fn(),
+  startGdriveOAuth: vi.fn(),
+  completeGdriveOAuthManual: vi.fn(),
+  cancelGdriveOAuth: vi.fn(),
+  disconnectGdrive: vi.fn(),
+  verifyGdriveFolder: vi.fn(),
+  syncWithGdrive: vi.fn(),
+  onGdriveSyncUpdated: vi.fn(),
+  onGdriveOAuthError: vi.fn(),
   onDownloadUpdated: vi.fn(),
   toggleFullscreen: vi.fn(),
   setFullscreen: vi.fn(),
@@ -147,6 +160,78 @@ const EMPTY_DASHBOARD: HomeDashboardData = {
     daily_7d: [],
   },
 };
+
+const mkTestDetails = (overrides?: Partial<NovelDetailsResponse>): NovelDetailsResponse => ({
+  novel: {
+    id: "n1",
+    source_id: "gutenberg",
+    external_id: "1342",
+    title: "Pride and Prejudice",
+    author_id: null,
+    author: "Jane Austen",
+    description: "A classic novel.",
+    cover_url: null,
+    local_cover_path: null,
+    status: "completed",
+    genres: ["Classic"],
+    tags: [],
+    rating: null,
+    popularity: 100,
+    chapter_count: 2,
+    last_updated_remote: null,
+    metadata: {},
+    is_local: false,
+    created_at: "2026-01-01T00:00:00Z",
+    updated_at: "2026-01-01T00:00:00Z",
+  },
+  chapters: [
+    {
+      id: "c1",
+      novel_id: "n1",
+      external_id: "1",
+      chapter_number: 1,
+      volume: null,
+      title: "Chapter One",
+      url: null,
+      word_count: 10,
+      published_at: null,
+      is_downloaded: true,
+      local_path: null,
+      size_bytes: 120,
+    },
+    {
+      id: "c2",
+      novel_id: "n1",
+      external_id: "2",
+      chapter_number: 2,
+      volume: null,
+      title: "Chapter Two",
+      url: null,
+      word_count: 10,
+      published_at: null,
+      is_downloaded: true,
+      local_path: null,
+      size_bytes: 120,
+    },
+  ],
+  library_entry: {
+    novel_id: "n1",
+    status: "reading",
+    is_bookmarked: true,
+    follow_updates: false,
+    last_checked_chapters: 2,
+    added_at: "2026-01-01T00:00:00Z",
+    updated_at: "2026-01-01T00:00:00Z",
+  },
+  reading_progress: null,
+  bookmarks: [],
+  highlights: [],
+  translations: [],
+  collection_ids: [],
+  downloaded_chapters: 2,
+  total_size_bytes: 240,
+  ...overrides,
+});
 
 const SAMPLE_SOURCE: SourceInfo = {
   id: "gutenberg",
@@ -471,6 +556,44 @@ describe("SettingsPage custom source installation", () => {
           kind: "opds",
           base_url: "http://127.0.0.1:8080",
           feed_url: "http://127.0.0.1:8080/opds",
+        }),
+      );
+    });
+  });
+
+  it("allows adding any URL in auto-parser mode without manual ID or name", async () => {
+    mockApi.installCustomSource.mockResolvedValue({
+      ...SAMPLE_SOURCE,
+      id: "auto_example_org",
+      name: "example.org",
+      kind: "auto",
+      is_custom: true,
+    });
+
+    const onUpdateSettings = vi.fn();
+    const onNotify = vi.fn();
+
+    render(
+      <SettingsPage
+        settings={BASE_SETTINGS}
+        onUpdateSettings={onUpdateSettings}
+        onNotify={onNotify}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Sources" }));
+    fireEvent.click(screen.getByRole("button", { name: /Add Source by URL/i }));
+
+    fireEvent.change(screen.getByPlaceholderText("Base URL (https://...)"), {
+      target: { value: "https://example.org/novels" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /Save & Activate Source/i }));
+
+    await waitFor(() => {
+      expect(mockApi.installCustomSource).toHaveBeenCalledWith(
+        expect.objectContaining({
+          kind: "auto",
+          base_url: "https://example.org/novels",
         }),
       );
     });
@@ -1105,78 +1228,6 @@ describe("SettingsPage Reader defaults", () => {
 
 
 describe("Regression guards for NovelDetailsPage and ReaderPage fixes", () => {
-  const mkTestDetails = (overrides?: Partial<NovelDetailsResponse>): NovelDetailsResponse => ({
-    novel: {
-      id: "n1",
-      source_id: "gutenberg",
-      external_id: "1342",
-      title: "Pride and Prejudice",
-      author_id: null,
-      author: "Jane Austen",
-      description: "A classic novel.",
-      cover_url: null,
-      local_cover_path: null,
-      status: "completed",
-      genres: ["Classic"],
-      tags: [],
-      rating: null,
-      popularity: 100,
-      chapter_count: 2,
-      last_updated_remote: null,
-      metadata: {},
-      is_local: false,
-      created_at: "2026-01-01T00:00:00Z",
-      updated_at: "2026-01-01T00:00:00Z",
-    },
-    chapters: [
-      {
-        id: "c1",
-        novel_id: "n1",
-        external_id: "1",
-        chapter_number: 1,
-        volume: null,
-        title: "Chapter One",
-        url: null,
-        word_count: 10,
-        published_at: null,
-        is_downloaded: true,
-        local_path: null,
-        size_bytes: 120,
-      },
-      {
-        id: "c2",
-        novel_id: "n1",
-        external_id: "2",
-        chapter_number: 2,
-        volume: null,
-        title: "Chapter Two",
-        url: null,
-        word_count: 10,
-        published_at: null,
-        is_downloaded: true,
-        local_path: null,
-        size_bytes: 120,
-      },
-    ],
-    library_entry: {
-      novel_id: "n1",
-      status: "reading",
-      is_bookmarked: true,
-      follow_updates: false,
-      last_checked_chapters: 2,
-      added_at: "2026-01-01T00:00:00Z",
-      updated_at: "2026-01-01T00:00:00Z",
-    },
-    reading_progress: null,
-    bookmarks: [],
-    highlights: [],
-    translations: [],
-    collection_ids: [],
-    downloaded_chapters: 2,
-    total_size_bytes: 240,
-    ...overrides,
-  });
-
   it("queries fresh bookmarks via listBookmarks when un-bookmarking despite stale details.bookmarks", async () => {
     const initial = mkTestDetails({ bookmarks: [] });
     mockApi.getNovelDetails.mockResolvedValue(initial);
@@ -2007,7 +2058,7 @@ describe("New features: seamless scroll, flip toggle, colored annotations, and t
     await waitFor(() => {
       expect(mockApi.discoverNovels).toHaveBeenCalledWith(
         expect.objectContaining({
-          source_id: "gutenberg,standardebooks,archive_org,wikisource",
+          source_id: "gutenberg,standardebooks,archive_org,wikisource,openlibrary",
         }),
       );
     });
@@ -2015,5 +2066,386 @@ describe("New features: seamless scroll, flip toggle, colored annotations, and t
     expect(screen.getAllByText("Arthur Conan Doyle").length).toBeGreaterThan(0);
     expect(screen.getByRole("button", { name: "Standard Ebooks" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "FanMTL" })).not.toBeInTheDocument();
+  });
+
+  it("imports EPUB and PDF files directly from the Downloads tab", async () => {
+    mockApi.listDownloads.mockResolvedValue([]);
+    mockApi.getStorageStats.mockResolvedValue({
+      total_bytes: 0,
+      chapters_bytes: 0,
+      covers_bytes: 0,
+      database_bytes: 0,
+      download_dir: "/tmp/downloads",
+      novels: [],
+    });
+    mockApi.onDownloadUpdated.mockResolvedValue(() => {});
+    mockApi.pickBookFiles.mockResolvedValue(["/books/sample.pdf", "/books/story.epub"]);
+    mockApi.importLocalBook.mockResolvedValue({
+      novel: {
+        id: "local:1",
+        source_id: "local",
+        external_id: "1",
+        title: "Sample PDF",
+        author: "Unknown Author",
+        description: "",
+        cover_url: null,
+        local_cover_path: null,
+        status: "completed",
+        genres: [],
+        tags: ["PDF"],
+        rating: null,
+        popularity: 0,
+        chapter_count: 1,
+        last_updated_remote: null,
+        metadata: {},
+        is_local: true,
+        created_at: "2026-01-01T00:00:00Z",
+        updated_at: "2026-01-01T00:00:00Z",
+      },
+      chapters_imported: 1,
+    });
+
+    const onNotify = vi.fn();
+    render(<DownloadsPage onOpenNovel={vi.fn()} onNotify={onNotify} />);
+
+    const addBtn = await screen.findByRole("button", { name: /Add Book \(EPUB, PDF, \.\.\.\)/i });
+    fireEvent.click(addBtn);
+
+    await waitFor(() => {
+      expect(mockApi.importLocalBook).toHaveBeenCalledWith("/books/sample.pdf");
+      expect(mockApi.importLocalBook).toHaveBeenCalledWith("/books/story.epub");
+    });
+    expect(onNotify).toHaveBeenCalledWith("Imported 2 books into offline downloads");
+  });
+
+  it("fails cleanly without undefined invoke errors when called in a plain browser", async () => {
+    const actualTauri = await vi.importActual<typeof import("../api/tauri")>("../api/tauri");
+    const win = window as unknown as Record<string, unknown>;
+    const prevInternals = win.__TAURI_INTERNALS__;
+    const prevTauri = win.__TAURI__;
+    delete win.__TAURI_INTERNALS__;
+    delete win.__TAURI__;
+
+    try {
+      expect(actualTauri.isTauriEnv()).toBe(false);
+      await expect(actualTauri.api.getHomeDashboard()).rejects.toThrow(
+        "Novelium native Tauri runtime is unavailable in plain browser preview.",
+      );
+      await expect(actualTauri.api.pickBookFiles()).rejects.toThrow(
+        "Novelium native Tauri runtime is unavailable in plain browser preview.",
+      );
+    } finally {
+      if (prevInternals !== undefined) win.__TAURI_INTERNALS__ = prevInternals;
+      if (prevTauri !== undefined) win.__TAURI__ = prevTauri;
+    }
+  });
+
+  it("preserves HomePage dashboard error without firing online feeds when IPC fails", async () => {
+    mockApi.getHomeDashboard.mockRejectedValue(
+      new Error("Novelium native Tauri runtime is unavailable in plain browser preview."),
+    );
+
+    render(
+      <HomePage
+        feedCache={null}
+        onUpdateFeedCache={vi.fn()}
+        onOpenNovel={vi.fn()}
+        onOpenRemoteNovel={vi.fn()}
+        onStartReading={vi.fn()}
+        onNavigate={vi.fn()}
+      />,
+    );
+
+    expect(
+      await screen.findByText(
+        /Novelium native Tauri runtime is unavailable in plain browser preview\./,
+      ),
+    ).toBeInTheDocument();
+    expect(mockApi.discoverNovels).not.toHaveBeenCalled();
+  });
+
+  it("reloads restored settings immediately after importing a JSON backup", async () => {
+    const restoredSettings: AppSettings = {
+      ...BASE_SETTINGS,
+      reader_theme: "sepia",
+      reader_width: 840,
+      download_dir: "/target/profile/downloads",
+    };
+    mockApi.listSources.mockResolvedValue([]);
+    mockApi.getStorageStats.mockResolvedValue({
+      total_bytes: 0,
+      chapters_bytes: 0,
+      covers_bytes: 0,
+      database_bytes: 0,
+      download_dir: "/target/profile/downloads",
+      novels: [],
+    });
+    mockApi.getDiagnostics.mockResolvedValue({
+      app_data_dir: "/tmp/app-data",
+      db_path: "/tmp/db.sqlite",
+      custom_sources_dir: "/tmp/sources",
+      logs: [],
+    });
+    mockApi.pickOpenJsonFile.mockResolvedValue("/tmp/backup.json");
+    mockApi.importLibraryJson.mockResolvedValue({
+      novels_imported: 2,
+      entries_imported: 1,
+    });
+    mockApi.getSettings.mockResolvedValue(restoredSettings);
+
+    const onUpdateSettings = vi.fn();
+    const onNotify = vi.fn();
+    render(
+      <SettingsPage
+        settings={BASE_SETTINGS}
+        onUpdateSettings={onUpdateSettings}
+        onNotify={onNotify}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: /General & Backups/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /Import \/ Restore Backup/i }));
+
+    await waitFor(() => {
+      expect(mockApi.importLibraryJson).toHaveBeenCalledWith("/tmp/backup.json");
+      expect(mockApi.getSettings).toHaveBeenCalled();
+      expect(onUpdateSettings).toHaveBeenCalledWith(restoredSettings);
+    });
+  });
+
+  it("jumps to highlight and bookmark paragraph_index from the reader TOC drawer", async () => {
+    const details = mkTestDetails({
+      highlights: [
+        {
+          id: "hl1",
+          novel_id: "n1",
+          chapter_id: "c1",
+          paragraph_index: 1,
+          start_offset: 0,
+          end_offset: 10,
+          text: "Second para",
+          color: "mint",
+          note: null,
+          created_at: "2026-01-01T00:00:00Z",
+        },
+      ],
+      bookmarks: [
+        {
+          id: "bm1",
+          novel_id: "n1",
+          novel_title: "Pride and Prejudice",
+          author: "Jane Austen",
+          cover_url: null,
+          local_cover_path: null,
+          chapter_id: "c2",
+          chapter_number: 2,
+          chapter_title: "Chapter Two",
+          paragraph_index: 1,
+          excerpt: "Target in ch2",
+          note: null,
+          color: "amber",
+          is_novel_bookmark: false,
+          created_at: "2026-01-01T00:00:00Z",
+        },
+      ],
+    });
+    const ch1: ChapterContent = {
+      chapter_id: "c1",
+      novel_id: "n1",
+      chapter_number: 1,
+      title: "Chapter One",
+      html: "<p>First para.</p><p>Second para.</p>",
+      paragraphs: ["First para.", "Second para."],
+      word_count: 4,
+      is_downloaded: true,
+      prev_chapter_id: null,
+      next_chapter_id: "c2",
+    };
+    const ch2: ChapterContent = {
+      chapter_id: "c2",
+      novel_id: "n1",
+      chapter_number: 2,
+      title: "Chapter Two",
+      html: "<p>Ch2 opener.</p><p>Target in ch2.</p>",
+      paragraphs: ["Ch2 opener.", "Target in ch2."],
+      word_count: 5,
+      is_downloaded: true,
+      prev_chapter_id: "c1",
+      next_chapter_id: null,
+    };
+    mockApi.getNovelDetails.mockResolvedValue(details);
+    mockApi.getChapterContent.mockImplementation(async (_nId: string, chId: string) =>
+      chId === "c2" ? ch2 : ch1,
+    );
+
+    const scrolledTargets: Array<string | null> = [];
+    const origScrollIntoView = Element.prototype.scrollIntoView;
+    Element.prototype.scrollIntoView = function () {
+      scrolledTargets.push(`${this.getAttribute("data-ch")}:${this.getAttribute("data-p")}`);
+    };
+
+    try {
+      render(
+        <ReaderPage
+          novelId="n1"
+          initialChapterId="c1"
+          settings={BASE_SETTINGS}
+          onUpdateSettings={vi.fn()}
+          onExit={vi.fn()}
+          onNotify={vi.fn()}
+        />,
+      );
+
+      expect(await screen.findByText("First para.")).toBeInTheDocument();
+
+      fireEvent.click(screen.getByTitle("Table of Contents (T)"));
+      fireEvent.click(screen.getByRole("button", { name: /Highlights & Marks/i }));
+      fireEvent.click(screen.getByRole("button", { name: /Second para/i }));
+
+      await waitFor(() => {
+        expect(scrolledTargets).toContain("c1:1");
+      });
+
+      fireEvent.click(screen.getByTitle("Table of Contents (T)"));
+      fireEvent.click(screen.getByRole("button", { name: /Highlights & Marks/i }));
+      fireEvent.click(screen.getByRole("button", { name: "Chapter Two" }));
+
+      expect(await screen.findByText("Target in ch2.")).toBeInTheDocument();
+      await waitFor(() => {
+        expect(scrolledTargets).toContain("c2:1");
+      });
+    } finally {
+      Element.prototype.scrollIntoView = origScrollIntoView;
+    }
+  });
+
+  it("extracts Google Drive folder IDs and connects/syncs via Settings Cloud Sync tab", async () => {
+    expect(
+      extractGoogleDriveFolderId(
+        "https://drive.google.com/drive/folders/1JoF3DeGpjMRY__lN-nY-OITpT6Dma2Yd?hl=pl",
+      ),
+    ).toBe("1JoF3DeGpjMRY__lN-nY-OITpT6Dma2Yd");
+    expect(extractGoogleDriveFolderId("https://example.com/folders/123456789012")).toBeNull();
+
+    const initialStatus = {
+      enabled: false,
+      client_id: "",
+      has_client_secret: false,
+      folder_input: "",
+      folder_id: "",
+      folder_name: null,
+      sync_downloaded_books: true,
+      sync_settings: true,
+      auto_sync_on_launch: false,
+      connected: false,
+      connected_email: null,
+      token_expires_at: null,
+      last_sync_at: null,
+      last_sync_summary: null,
+    };
+    const savedStatus = {
+      ...initialStatus,
+      client_id: "123.apps.googleusercontent.com",
+      folder_input: "https://drive.google.com/drive/folders/1JoF3DeGpjMRY__lN-nY-OITpT6Dma2Yd?hl=pl",
+      folder_id: "1JoF3DeGpjMRY__lN-nY-OITpT6Dma2Yd",
+    };
+    const connectedStatus = {
+      ...savedStatus,
+      enabled: true,
+      connected: true,
+      connected_email: "reader@example.com",
+      folder_name: "Novelium Sync",
+    };
+
+    mockApi.listSources.mockResolvedValue([]);
+    mockApi.getStorageStats.mockResolvedValue({
+      total_bytes: 0,
+      chapters_bytes: 0,
+      covers_bytes: 0,
+      database_bytes: 0,
+      download_dir: "/tmp/dl",
+      novels: [],
+    });
+    mockApi.getDiagnostics.mockResolvedValue({
+      app_data_dir: "/tmp/app",
+      db_path: "/tmp/db.sqlite",
+      custom_sources_dir: "/tmp/sources",
+      logs: [],
+    });
+    mockApi.onGdriveSyncUpdated.mockResolvedValue(() => {});
+    mockApi.onGdriveOAuthError.mockResolvedValue(() => {});
+    mockApi.getGdriveSyncStatus
+      .mockResolvedValueOnce(initialStatus)
+      .mockResolvedValue(connectedStatus);
+    mockApi.saveGdriveSyncConfig.mockImplementation(async (patch) => ({
+      ...savedStatus,
+      enabled: patch.enabled,
+      connected: mockApi.completeGdriveOAuthManual.mock.calls.length > 0,
+      connected_email:
+        mockApi.completeGdriveOAuthManual.mock.calls.length > 0 ? "reader@example.com" : null,
+      folder_name:
+        mockApi.completeGdriveOAuthManual.mock.calls.length > 0 ? "Novelium Sync" : null,
+    }));
+    mockApi.startGdriveOAuth.mockResolvedValue({
+      auth_url: "https://accounts.google.com/o/oauth2/v2/auth?state=test",
+      redirect_uri: "http://127.0.0.1:49152/oauth2callback",
+      browser_opened: true,
+    });
+    mockApi.completeGdriveOAuthManual.mockResolvedValue(connectedStatus);
+    mockApi.syncWithGdrive.mockResolvedValue({
+      folder_id: "1JoF3DeGpjMRY__lN-nY-OITpT6Dma2Yd",
+      folder_name: "Novelium Sync",
+      novels_merged: 3,
+      library_entries_merged: 3,
+      books_downloaded: 1,
+      chapters_downloaded: 12,
+      books_uploaded: 2,
+      settings_applied: true,
+      synced_at: "2026-11-13T18:30:00Z",
+    });
+    const syncedSettings: AppSettings = { ...BASE_SETTINGS, reader_theme: "paper" };
+    mockApi.getSettings.mockResolvedValue(syncedSettings);
+
+    const onUpdateSettings = vi.fn();
+    const onNotify = vi.fn();
+    render(
+      <SettingsPage
+        settings={BASE_SETTINGS}
+        onUpdateSettings={onUpdateSettings}
+        onNotify={onNotify}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: /Cloud Sync/i }));
+    const folderInput = await screen.findByLabelText(/Google Drive Folder URL or ID/i);
+    fireEvent.change(folderInput, {
+      target: {
+        value: "https://drive.google.com/drive/folders/1JoF3DeGpjMRY__lN-nY-OITpT6Dma2Yd?hl=pl",
+      },
+    });
+    expect(
+      screen.getByText(/Detected Folder ID: 1JoF3DeGpjMRY__lN-nY-OITpT6Dma2Yd/),
+    ).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText(/Google OAuth Client ID/i), {
+      target: { value: "123.apps.googleusercontent.com" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /Connect Google Drive/i }));
+
+    expect(
+      await screen.findByLabelText(/OAuth Redirect URL or Authorization Code/i),
+    ).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText(/OAuth Redirect URL or Authorization Code/i), {
+      target: { value: "http://127.0.0.1:49152/oauth2callback?code=4/authcode&state=test" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /Complete Sign-In/i }));
+
+    expect(await screen.findByText(/Connected: reader@example\.com/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Sync Now/i }));
+    await waitFor(() => {
+      expect(mockApi.syncWithGdrive).toHaveBeenCalledTimes(1);
+      expect(onUpdateSettings).toHaveBeenCalledWith(syncedSettings);
+    });
   });
 });

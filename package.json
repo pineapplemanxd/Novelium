@@ -6,6 +6,7 @@
   "description": "Novelium — Cross-Platform macOS & Windows Novel Reader & Personal Library",
   "scripts": {
     "dev": "vite",
+    "dev:ios": "node scripts/ensure-ios-sim.mjs && vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "test": "vitest run",

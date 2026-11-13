@@ -515,7 +515,7 @@ pub struct AppSettings {
     pub reader_line_height: f64,
     pub reader_paragraph_spacing: f64,
     pub reader_width: u32,
-    pub reader_theme: String, // "obsidian" | "paper" | "sepia" | "forest" | "custom"
+    pub reader_theme: String, // "obsidian" | "amoled" | "paper" | "sepia" | "forest" | "custom"
     pub reader_custom_bg: String,
     pub reader_custom_fg: String,
     pub reader_custom_accent: String,
@@ -604,4 +604,112 @@ pub struct LibraryExportBundle {
     pub collection_items: Vec<(String, String, String)>,
     pub reading_history: Vec<ReadingHistoryItem>,
     pub settings: Option<AppSettings>,
+    #[serde(default)]
+    pub settings_updated_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GoogleDriveSyncConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub client_id: String,
+    #[serde(default)]
+    pub client_secret: String,
+    #[serde(default)]
+    pub folder_input: String,
+    #[serde(default)]
+    pub folder_id: String,
+    #[serde(default)]
+    pub folder_name: Option<String>,
+    #[serde(default = "default_true")]
+    pub sync_downloaded_books: bool,
+    #[serde(default = "default_true")]
+    pub sync_settings: bool,
+    #[serde(default)]
+    pub auto_sync_on_launch: bool,
+    #[serde(default)]
+    pub connected_email: Option<String>,
+    #[serde(default)]
+    pub access_token: Option<String>,
+    #[serde(default)]
+    pub refresh_token: Option<String>,
+    #[serde(default)]
+    pub token_expires_at: Option<String>,
+    #[serde(default)]
+    pub last_sync_at: Option<String>,
+    #[serde(default)]
+    pub last_sync_summary: Option<String>,
+}
+
+impl Default for GoogleDriveSyncConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            client_id: String::new(),
+            client_secret: String::new(),
+            folder_input: String::new(),
+            folder_id: String::new(),
+            folder_name: None,
+            sync_downloaded_books: true,
+            sync_settings: true,
+            auto_sync_on_launch: false,
+            connected_email: None,
+            access_token: None,
+            refresh_token: None,
+            token_expires_at: None,
+            last_sync_at: None,
+            last_sync_summary: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GoogleDriveSyncConfigPatch {
+    pub enabled: bool,
+    pub client_id: String,
+    /// `None` keeps existing stored secret; `Some("")` clears it; `Some(val)` replaces it.
+    pub client_secret_update: Option<String>,
+    pub folder_input: String,
+    pub sync_downloaded_books: bool,
+    pub sync_settings: bool,
+    pub auto_sync_on_launch: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GoogleDriveSyncStatus {
+    pub enabled: bool,
+    pub client_id: String,
+    pub has_client_secret: bool,
+    pub folder_input: String,
+    pub folder_id: String,
+    pub folder_name: Option<String>,
+    pub sync_downloaded_books: bool,
+    pub sync_settings: bool,
+    pub auto_sync_on_launch: bool,
+    pub connected: bool,
+    pub connected_email: Option<String>,
+    pub token_expires_at: Option<String>,
+    pub last_sync_at: Option<String>,
+    pub last_sync_summary: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GoogleDriveOAuthStartResult {
+    pub auth_url: String,
+    pub redirect_uri: String,
+    pub browser_opened: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct GoogleDriveSyncReport {
+    pub folder_id: String,
+    pub folder_name: Option<String>,
+    pub novels_merged: usize,
+    pub library_entries_merged: usize,
+    pub books_downloaded: usize,
+    pub chapters_downloaded: usize,
+    pub books_uploaded: usize,
+    pub settings_applied: bool,
+    pub synced_at: String,
 }

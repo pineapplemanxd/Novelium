@@ -6,6 +6,7 @@ use crate::db::Database;
 use crate::downloads::DownloadManager;
 use crate::net::SourceHttpClient;
 use crate::sources::SourceRegistry;
+use crate::sync::GoogleDriveSyncCoordinator;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -13,6 +14,7 @@ pub struct AppState {
     pub sources: SourceRegistry,
     pub downloads: DownloadManager,
     pub http: SourceHttpClient,
+    pub gdrive: GoogleDriveSyncCoordinator,
     pub app_data_dir: PathBuf,
     pub default_download_dir: PathBuf,
     pub logs: Arc<Mutex<Vec<String>>>,

@@ -11,13 +11,14 @@ import {
   Library,
   Menu,
   Moon,
+  MoreHorizontal,
   Search,
   Settings,
   Sun,
   X,
 } from "lucide-react";
 import { api, extractErrorMessage } from "./api/tauri";
-import { IS_MAC, MOD_KEY } from "./utils/format";
+import { IS_IOS, IS_MAC_DESKTOP, MOD_KEY, useDeviceLayout } from "./utils/format";
 import { CommandPalette } from "./components/CommandPalette";
 import { BookmarksPage } from "./pages/BookmarksPage";
 import { DiscoverPage } from "./pages/DiscoverPage";
@@ -107,7 +108,13 @@ export function App() {
   }>({});
   const [homeFeedCache, setHomeFeedCache] = useState<HomeFeedCache | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const deviceLayout = useDeviceLayout();
+  const isPhone = deviceLayout === "phone";
+  const isTablet = deviceLayout === "tablet";
+  const [sidebarOpen, setSidebarOpen] = useState(() =>
+    IS_IOS ? (typeof window !== "undefined" ? window.innerWidth >= 1024 : false) : true,
+  );
+  const [moreOpen, setMoreOpen] = useState(false);
   const [activeDownloadsCount, setActiveDownloadsCount] = useState(0);
   const [toast, setToast] = useState<{ msg: string; isError: boolean } | null>(null);
 
@@ -150,6 +157,26 @@ export function App() {
         if (loaded.check_updates_on_launch) {
           api.checkFollowedUpdates().catch(() => {});
         }
+        Promise.resolve(api.getGdriveSyncStatus?.())
+          .then(async (syncSt) => {
+            if (syncSt?.enabled && syncSt.connected && syncSt.auto_sync_on_launch && syncSt.folder_id) {
+              const report = await api.syncWithGdrive();
+              if (report.settings_applied) {
+                const updatedSettings = await api.getSettings();
+                setSettings(updatedSettings);
+              }
+              if (
+                report.books_downloaded > 0 ||
+                report.books_uploaded > 0 ||
+                report.novels_merged > 0
+              ) {
+                notify(
+                  `Google Drive synced: ${report.novels_merged} books merged, ${report.books_downloaded} downloaded, ${report.books_uploaded} uploaded`,
+                );
+              }
+            }
+          })
+          .catch(() => {});
       })
       .catch(() => {});
 
@@ -180,7 +207,7 @@ export function App() {
     return () => unlisten?.();
   }, []);
 
-  // Global Cmd+K / Ctrl+K shortcut
+  // Global Cmd+K / Ctrl+K shortcut & mobile background suspension pause
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
@@ -188,8 +215,23 @@ export function App() {
         setPaletteOpen((v) => !v);
       }
     };
+    const onSuspend = () => {
+      if (!IS_IOS) return;
+      if (document.visibilityState === "hidden") {
+        api.pauseActiveDownloads().catch(() => {});
+      }
+    };
+    const onPageHide = () => {
+      if (IS_IOS) api.pauseActiveDownloads().catch(() => {});
+    };
     window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
+    document.addEventListener("visibilitychange", onSuspend);
+    window.addEventListener("pagehide", onPageHide);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      document.removeEventListener("visibilitychange", onSuspend);
+      window.removeEventListener("pagehide", onPageHide);
+    };
   }, []);
 
   const handleUpdateSettings = useCallback(
@@ -260,7 +302,7 @@ export function App() {
         />
         {toast && (
           <div
-            className={`fixed bottom-5 right-5 z-50 px-4 py-2.5 rounded-xl text-xs font-medium shadow-xl border ${
+            className={`fixed bottom-[calc(1.25rem+var(--safe-bottom))] right-4 left-4 sm:left-auto sm:right-5 z-50 px-4 py-2.5 rounded-xl text-xs font-medium shadow-xl border ${
               toast.isError
                 ? "bg-rose-950/95 border-rose-500/40 text-rose-200"
                 : "bg-[var(--bg-elevated)] border-[var(--border-strong)] text-[var(--text-primary)]"
@@ -280,22 +322,60 @@ export function App() {
       settings.sidebar_sections.includes(item.id),
   );
 
+  const primaryPhoneIds: MainTab[] = ["home", "discover", "books", "library"];
+  const phonePrimaryNav = primaryPhoneIds
+    .map((id) => NAV_ITEMS.find((item) => item.id === id)!)
+    .filter(Boolean);
+  const phoneMoreNav = visibleNavItems.filter(
+    (item) => !primaryPhoneIds.includes(item.id),
+  );
+  const isTabletOverlay =
+    isTablet && typeof window !== "undefined" && window.innerWidth < 1024;
+
+  const selectTab = (id: MainTab) => {
+    setSelectedNovelId(null);
+    setActiveTab(id);
+    setMoreOpen(false);
+    if (isTabletOverlay) setSidebarOpen(false);
+  };
+
   return (
-    <div className="h-screen w-screen flex overflow-hidden bg-[var(--bg-app)] text-[var(--text-primary)]">
-      {/* Sidebar */}
-      {sidebarOpen && (
-        <aside className="w-56 shrink-0 flex flex-col border-r border-[var(--border-subtle)] bg-[var(--bg-sidebar)] select-none">
+    <div className="h-[100dvh] w-screen flex overflow-hidden bg-[var(--bg-app)] text-[var(--text-primary)]">
+      {/* Tablet Portrait Overlay Backdrop */}
+      {isTabletOverlay && sidebarOpen && (
+        <div
+          aria-hidden="true"
+          onClick={() => setSidebarOpen(false)}
+          className="fixed inset-0 z-30 bg-black/50 backdrop-blur-[1px]"
+        />
+      )}
+
+      {/* Sidebar (Desktop + iPad; hidden on iPhone in favor of Bottom Tab Bar) */}
+      {!isPhone && sidebarOpen && (
+        <aside
+          className={`w-56 shrink-0 flex flex-col border-r border-[var(--border-subtle)] bg-[var(--bg-sidebar)] select-none ${
+            isTabletOverlay ? "fixed inset-y-0 left-0 z-40 shadow-2xl" : ""
+          } ${IS_IOS ? "pt-[var(--safe-top)] pb-[var(--safe-bottom)]" : ""}`}
+        >
           {/* macOS Traffic Lights Spacer + Brand */}
           <div
-            data-tauri-drag-region="deep"
-            className={`macos-drag h-12 px-4 flex items-center ${
-              IS_MAC ? "pt-2 justify-end" : "justify-between"
-            }`}
+            data-tauri-drag-region={IS_MAC_DESKTOP ? "deep" : undefined}
+            className={`${IS_MAC_DESKTOP ? "macos-drag pt-2 justify-end" : "justify-between"} h-12 px-4 flex items-center`}
           >
             <div className="flex items-center gap-2 text-xs font-semibold tracking-tight text-[var(--text-primary)]">
               <BookOpen className="w-4 h-4 text-[var(--accent-hover)]" />
               <span>Novelium</span>
             </div>
+            {isTabletOverlay && (
+              <button
+                type="button"
+                aria-label="Close navigation"
+                onClick={() => setSidebarOpen(false)}
+                className="p-2 rounded-lg text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            )}
           </div>
 
           <nav className="flex-1 px-2.5 py-2 space-y-0.5 overflow-y-auto">
@@ -306,11 +386,10 @@ export function App() {
                 <button
                   key={item.id}
                   type="button"
-                  onClick={() => {
-                    setSelectedNovelId(null);
-                    setActiveTab(item.id);
-                  }}
-                  className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-[13px] transition-colors ${
+                  onClick={() => selectTab(item.id)}
+                  className={`w-full flex items-center justify-between px-3 ${
+                    isTablet ? "py-2.5 min-h-[44px]" : "py-2"
+                  } rounded-lg text-[13px] transition-colors ${
                     isActive
                       ? "bg-[var(--accent-soft)] text-[var(--accent-hover)] font-medium"
                       : "text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]"
@@ -350,7 +429,7 @@ export function App() {
                     theme: settings.theme === "light" ? "dark" : "light",
                   })
                 }
-                className="p-1 rounded-md hover:bg-[var(--bg-hover)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
+                className="p-1.5 rounded-md hover:bg-[var(--bg-hover)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
               >
                 {settings.theme === "light" ? (
                   <Moon className="w-3.5 h-3.5" />
@@ -358,7 +437,7 @@ export function App() {
                   <Sun className="w-3.5 h-3.5" />
                 )}
               </button>
-              <span>{MOD_KEY}K</span>
+              {!IS_IOS && <span>{MOD_KEY}K</span>}
             </div>
           </div>
         </aside>
@@ -368,43 +447,78 @@ export function App() {
       <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
         {/* Top Bar with macOS Drag Region & Global Search */}
         <header
-          data-tauri-drag-region="deep"
-          className={`macos-drag h-12 shrink-0 px-4 border-b border-[var(--border-subtle)] bg-[var(--bg-app)]/90 backdrop-blur-md flex items-center justify-between gap-4 ${
-            IS_MAC && !sidebarOpen ? "pl-20" : ""
-          }`}
+          data-tauri-drag-region={IS_MAC_DESKTOP ? "deep" : undefined}
+          className={`${IS_MAC_DESKTOP ? "macos-drag" : ""} shrink-0 px-3 sm:px-4 border-b border-[var(--border-subtle)] bg-[var(--bg-app)]/90 backdrop-blur-md flex items-center justify-between gap-2 sm:gap-4 ${
+            IS_IOS ? "pt-[var(--safe-top)] min-h-[3.25rem]" : "h-12"
+          } ${IS_MAC_DESKTOP && !sidebarOpen ? "pl-20" : ""}`}
         >
           <div className="macos-no-drag flex items-center gap-2">
-            <button
-              type="button"
-              data-tauri-drag-region="false"
-              aria-label="Toggle sidebar"
-              onClick={() => setSidebarOpen((v) => !v)}
-              className="p-1.5 rounded-lg text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)]"
-            >
-              <Menu className="w-4 h-4" />
-            </button>
+            {isPhone ? (
+              <button
+                type="button"
+                onClick={() => selectTab("home")}
+                className="flex items-center gap-1.5 px-1 py-1.5 min-h-[40px] text-xs font-semibold tracking-tight text-[var(--text-primary)]"
+              >
+                <BookOpen className="w-4 h-4 text-[var(--accent-hover)]" />
+                <span>Novelium</span>
+              </button>
+            ) : (
+              <button
+                type="button"
+                data-tauri-drag-region="false"
+                aria-label="Toggle sidebar"
+                onClick={() => setSidebarOpen((v) => !v)}
+                className="p-2 rounded-lg text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)]"
+              >
+                <Menu className="w-4 h-4" />
+              </button>
+            )}
           </div>
 
           <button
             type="button"
             data-tauri-drag-region="false"
             onClick={() => setPaletteOpen(true)}
-            className="macos-no-drag flex items-center justify-between gap-4 w-full max-w-md px-3 py-1.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] hover:border-[var(--border-strong)] text-xs text-[var(--text-muted)] transition-colors"
+            className="macos-no-drag flex items-center justify-between gap-3 flex-1 max-w-md px-3 py-2 sm:py-1.5 min-h-[38px] rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] hover:border-[var(--border-strong)] text-xs text-[var(--text-muted)] transition-colors"
           >
             <span className="flex items-center gap-2 truncate">
-              <Search className="w-3.5 h-3.5" />
-              Search library or online novels...
+              <Search className="w-3.5 h-3.5 shrink-0" />
+              <span className="truncate">
+                {isPhone ? "Search novels..." : "Search library or online novels..."}
+              </span>
             </span>
-            <kbd className="px-1.5 py-0.5 rounded bg-[var(--bg-elevated)] text-[10px] border border-[var(--border-subtle)]">
-              {MOD_KEY}K
-            </kbd>
+            {!isPhone && !IS_IOS && (
+              <kbd className="px-1.5 py-0.5 rounded bg-[var(--bg-elevated)] text-[10px] border border-[var(--border-subtle)]">
+                {MOD_KEY}K
+              </kbd>
+            )}
           </button>
 
-          <div className="w-8" />
+          {isPhone ? (
+            <button
+              type="button"
+              aria-label="Toggle Light/Dark Theme"
+              onClick={() =>
+                handleUpdateSettings({
+                  ...settings,
+                  theme: settings.theme === "light" ? "dark" : "light",
+                })
+              }
+              className="p-2 min-w-[40px] min-h-[40px] flex items-center justify-center rounded-lg text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)]"
+            >
+              {settings.theme === "light" ? (
+                <Moon className="w-4 h-4" />
+              ) : (
+                <Sun className="w-4 h-4" />
+              )}
+            </button>
+          ) : (
+            <div className="w-8" />
+          )}
         </header>
 
         {/* Active View */}
-        <main className="flex-1 overflow-y-auto">
+        <main className="flex-1 overflow-y-auto overscroll-y-contain">
           {selectedNovelId ? (
             <NovelDetailsPage
               novelId={selectedNovelId}
@@ -478,7 +592,112 @@ export function App() {
             />
           )}
         </main>
+
+        {/* iPhone Bottom Tab Bar */}
+        {isPhone && (
+          <nav
+            aria-label="Primary Navigation"
+            className="shrink-0 border-t border-[var(--border-subtle)] bg-[var(--bg-sidebar)]/95 backdrop-blur-md grid grid-cols-5 pb-[var(--safe-bottom)]"
+          >
+            {phonePrimaryNav.map((item) => {
+              const Icon = item.icon;
+              const isActive = !moreOpen && !selectedNovelId && activeTab === item.id;
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => selectTab(item.id)}
+                  className={`flex flex-col items-center justify-center gap-0.5 py-2 min-h-[52px] text-[10px] transition-colors ${
+                    isActive
+                      ? "text-[var(--accent-hover)] font-semibold"
+                      : "text-[var(--text-secondary)]"
+                  }`}
+                >
+                  <Icon className="w-5 h-5" />
+                  <span className="truncate max-w-full px-1">{item.label}</span>
+                </button>
+              );
+            })}
+            <button
+              type="button"
+              aria-label="More navigation tabs"
+              aria-expanded={moreOpen}
+              onClick={() => setMoreOpen((v) => !v)}
+              className={`relative flex flex-col items-center justify-center gap-0.5 py-2 min-h-[52px] text-[10px] transition-colors ${
+                moreOpen ||
+                (!selectedNovelId && !primaryPhoneIds.includes(activeTab))
+                  ? "text-[var(--accent-hover)] font-semibold"
+                  : "text-[var(--text-secondary)]"
+              }`}
+            >
+              <MoreHorizontal className="w-5 h-5" />
+              <span>More</span>
+              {activeDownloadsCount > 0 && (
+                <span
+                  className="absolute top-1.5 right-4 w-2 h-2 rounded-full"
+                  style={{ backgroundColor: "var(--accent)" }}
+                />
+              )}
+            </button>
+          </nav>
+        )}
       </div>
+
+      {/* iPhone "More" Bottom Sheet */}
+      {isPhone && moreOpen && (
+        <div
+          className="fixed inset-0 z-40 flex items-end bg-black/55 backdrop-blur-[1px]"
+          onClick={() => setMoreOpen(false)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="w-full rounded-t-2xl border-t border-[var(--border-strong)] bg-[var(--bg-surface)] p-4 pb-[calc(1rem+var(--safe-bottom))] space-y-2 shadow-2xl"
+          >
+            <div className="flex items-center justify-between pb-2 border-b border-[var(--border-subtle)]">
+              <span className="text-sm font-semibold">More Sections</span>
+              <button
+                type="button"
+                aria-label="Close menu"
+                onClick={() => setMoreOpen(false)}
+                className="p-2 rounded-lg text-[var(--text-muted)]"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="grid grid-cols-1 gap-1">
+              {phoneMoreNav.map((item) => {
+                const Icon = item.icon;
+                const isActive = !selectedNovelId && activeTab === item.id;
+                return (
+                  <button
+                    key={item.id}
+                    type="button"
+                    onClick={() => selectTab(item.id)}
+                    className={`w-full flex items-center justify-between px-3.5 py-3 min-h-[44px] rounded-xl text-sm transition-colors ${
+                      isActive
+                        ? "bg-[var(--accent-soft)] text-[var(--accent-hover)] font-medium"
+                        : "text-[var(--text-primary)] hover:bg-[var(--bg-hover)]"
+                    }`}
+                  >
+                    <span className="flex items-center gap-3">
+                      <Icon className="w-4 h-4" />
+                      <span>{item.label}</span>
+                    </span>
+                    {item.id === "downloads" && activeDownloadsCount > 0 && (
+                      <span
+                        className="px-2 py-0.5 rounded-full text-[11px] font-semibold text-white"
+                        style={{ backgroundColor: "var(--accent)" }}
+                      >
+                        {activeDownloadsCount}
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Global Search Command Palette */}
       <CommandPalette
@@ -494,7 +713,11 @@ export function App() {
       {/* Toast Notification */}
       {toast && (
         <div
-          className={`fixed bottom-5 right-5 z-50 flex items-center gap-3 px-4 py-2.5 rounded-xl text-xs font-medium shadow-xl border ${
+          className={`fixed ${
+            isPhone
+              ? "bottom-[calc(4.75rem+var(--safe-bottom))] left-3 right-3"
+              : "bottom-5 right-5"
+          } z-50 flex items-center justify-between gap-3 px-4 py-2.5 rounded-xl text-xs font-medium shadow-xl border ${
             toast.isError
               ? "bg-rose-950/95 border-rose-500/40 text-rose-200"
               : "bg-[var(--bg-elevated)] border-[var(--border-strong)] text-[var(--text-primary)]"

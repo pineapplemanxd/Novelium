@@ -2,7 +2,14 @@ node_modules/
 dist/
 dist-ssr/
 src-tauri/target/
-src-tauri/gen/
+src-tauri/gen/schemas/
+src-tauri/gen/apple/Externals/
+src-tauri/gen/apple/Pods/
+src-tauri/gen/apple/build/
+src-tauri/gen/apple/.tauri/
+src-tauri/gen/apple/assets/*
+!src-tauri/gen/apple/assets/.gitkeep
+src-tauri/gen/apple/*.xcodeproj/xcuserdata/
 *.local
 *.db
 *.db-shm

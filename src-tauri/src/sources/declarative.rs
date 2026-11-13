@@ -10,18 +10,21 @@ use url::Url;
 use crate::error::{AppError, AppResult};
 use crate::formats::epub::parse_epub_bytes;
 use crate::formats::text_html::{clean_html_fragment_excluding, parse_html_bytes};
+use crate::formats::ParsedBook;
 use crate::models::{
     is_placeholder_author, Chapter, DiscoveryQuery, NovelRecord, NovelStatus, NovelSummary,
     SourceCapabilities,
 };
 use crate::net::SourceHttpClient;
+use crate::sources::archive_org::normalize_ia_lang_str;
 use crate::sources::{make_chapter_id, make_novel_id, CachedParsedBook, NovelSource, ParsedBookCache};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeclarativeKind {
     Opds,
     Html,
+    Auto,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,6 +70,122 @@ pub struct DeclarativeSourceManifest {
     pub language: Option<String>,
 }
 
+impl DeclarativeSourceManifest {
+    /// Builds a minimal Auto-parsed manifest from a single website or feed URL.
+    pub fn from_url(raw_url: &str) -> Self {
+        let mut m = Self {
+            id: String::new(),
+            name: String::new(),
+            kind: DeclarativeKind::Auto,
+            base_url: raw_url.trim().to_string(),
+            description: String::new(),
+            genres: vec!["All".into()],
+            feed_url: None,
+            search_url_template: None,
+            browse_url_template: None,
+            novel_list_selector: None,
+            title_selector: None,
+            author_selector: None,
+            cover_selector: None,
+            link_selector: None,
+            description_selector: None,
+            chapter_list_selector: None,
+            chapter_title_selector: None,
+            chapter_link_selector: None,
+            content_selector: None,
+            remove_selectors: Vec::new(),
+            language: None,
+        };
+        let _ = m.fill_defaults_from_url();
+        m
+    }
+
+    /// Validates `base_url` and fills missing `id`, `name`, and `description` from the URL.
+    pub fn fill_defaults_from_url(&mut self) -> AppResult<()> {
+        let base = self.base_url.trim().to_string();
+        let parsed = Url::parse(&base)
+            .map_err(|e| AppError::InvalidInput(format!("Invalid source URL '{base}': {e}")))?;
+        if !matches!(parsed.scheme(), "http" | "https") {
+            return Err(AppError::InvalidInput(
+                "Source URL must start with http:// or https://".into(),
+            ));
+        }
+        let host = parsed
+            .host_str()
+            .filter(|h| !h.is_empty())
+            .ok_or_else(|| AppError::InvalidInput("Source URL is missing a host name".into()))?;
+        let clean_host = host.strip_prefix("www.").unwrap_or(host);
+        self.base_url = base;
+
+        if self.id.trim().is_empty() {
+            let path_tail = parsed.path().trim_matches('/');
+            let raw = if path_tail.is_empty() {
+                format!("auto_{clean_host}")
+            } else {
+                format!("auto_{clean_host}_{path_tail}")
+            };
+            let mut slug = String::with_capacity(raw.len());
+            let mut prev_underscore = false;
+            for ch in raw.chars() {
+                if ch.is_ascii_alphanumeric() || ch == '-' {
+                    slug.push(ch.to_ascii_lowercase());
+                    prev_underscore = false;
+                } else if !prev_underscore {
+                    slug.push('_');
+                    prev_underscore = true;
+                }
+                if slug.len() >= 48 {
+                    break;
+                }
+            }
+            self.id = slug.trim_matches('_').to_string();
+        }
+        if self.name.trim().is_empty() {
+            let path_tail = parsed.path().trim_matches('/');
+            self.name = if path_tail.is_empty() {
+                clean_host.to_string()
+            } else {
+                format!("{clean_host}/{path_tail}")
+            };
+        }
+        if self.description.trim().is_empty() {
+            self.description = format!("Auto-parsed source ({})", self.base_url);
+        }
+        self.normalize_optional_fields();
+        Ok(())
+    }
+
+    /// Converts blank/whitespace-only optional selectors & templates to `None`.
+    pub fn normalize_optional_fields(&mut self) {
+        for field in [
+            &mut self.feed_url,
+            &mut self.search_url_template,
+            &mut self.browse_url_template,
+            &mut self.novel_list_selector,
+            &mut self.title_selector,
+            &mut self.author_selector,
+            &mut self.cover_selector,
+            &mut self.link_selector,
+            &mut self.description_selector,
+            &mut self.chapter_list_selector,
+            &mut self.chapter_title_selector,
+            &mut self.chapter_link_selector,
+            &mut self.content_selector,
+            &mut self.language,
+        ] {
+            if let Some(val) = field {
+                let trimmed = val.trim();
+                if trimmed.is_empty() {
+                    *field = None;
+                } else if trimmed.len() != val.len() {
+                    *field = Some(trimmed.to_string());
+                }
+            }
+        }
+        self.remove_selectors.retain(|s| !s.trim().is_empty());
+    }
+}
+
 pub struct DeclarativeSource {
     manifest: DeclarativeSourceManifest,
     http: SourceHttpClient,
@@ -76,10 +195,11 @@ pub struct DeclarativeSource {
 
 impl DeclarativeSource {
     pub fn new(
-        manifest: DeclarativeSourceManifest,
+        mut manifest: DeclarativeSourceManifest,
         http: SourceHttpClient,
         cache: ParsedBookCache,
     ) -> Self {
+        manifest.normalize_optional_fields();
         Self {
             manifest,
             http,
@@ -89,10 +209,11 @@ impl DeclarativeSource {
     }
 
     pub fn new_builtin(
-        manifest: DeclarativeSourceManifest,
+        mut manifest: DeclarativeSourceManifest,
         http: SourceHttpClient,
         cache: ParsedBookCache,
     ) -> Self {
+        manifest.normalize_optional_fields();
         Self {
             manifest,
             http,
@@ -334,6 +455,21 @@ impl DeclarativeSource {
         Ok(out)
     }
 
+    fn parse_and_cache_book_bytes(
+        &self,
+        novel_id: &str,
+        url: &str,
+        bytes: &[u8],
+    ) -> AppResult<(ParsedBook, CachedParsedBook)> {
+        let parsed = if bytes.starts_with(b"PK") {
+            parse_epub_bytes(bytes, url)?
+        } else {
+            parse_html_bytes(bytes, url)?
+        };
+        let cached = self.cache.put(novel_id, &parsed)?;
+        Ok((parsed, cached))
+    }
+
     async fn ensure_opds_parsed(&self, acquisition_url: &str) -> AppResult<CachedParsedBook> {
         let novel_id = make_novel_id(self.id(), acquisition_url);
         if let Some(cached) = self.cache.get(&novel_id) {
@@ -349,12 +485,395 @@ impl DeclarativeSource {
             }
         }
         let bytes = self.http.get_bytes(acquisition_url).await?;
-        let parsed = if bytes.starts_with(b"PK") {
-            parse_epub_bytes(&bytes, acquisition_url)?
-        } else {
-            parse_html_bytes(&bytes, acquisition_url)?
+        Ok(self.parse_and_cache_book_bytes(&novel_id, acquisition_url, &bytes)?.1)
+    }
+
+    fn parse_rss_feed(&self, feed_url: &str, xml: &str) -> AppResult<Vec<NovelSummary>> {
+        let doc = roxmltree::Document::parse(xml)?;
+        let mut items = Vec::new();
+        for item in doc.descendants().filter(|n| n.is_element() && n.tag_name().name() == "item") {
+            let child_text = |names: &[&str]| -> Option<String> {
+                item.children()
+                    .find(|c| c.is_element() && names.contains(&c.tag_name().name()))
+                    .and_then(|c| c.text())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+            };
+            let Some(title) = child_text(&["title"]) else {
+                continue;
+            };
+            let link = child_text(&["link"]).or_else(|| {
+                item.children()
+                    .find(|c| c.tag_name().name() == "link")
+                    .and_then(|l| l.attribute("href"))
+                    .map(str::to_string)
+            });
+            let Some(raw_link) = link else { continue };
+            let external_id = self.resolve_url(feed_url, &raw_link);
+            let author = child_text(&["creator", "author"]).unwrap_or_else(|| "Unknown Author".into());
+            let description = child_text(&["description", "encoded"]).unwrap_or_default();
+            items.push(NovelSummary {
+                id: make_novel_id(self.id(), &external_id),
+                source_id: self.id().to_string(),
+                external_id,
+                title,
+                author,
+                description,
+                cover_url: None,
+                local_cover_path: None,
+                status: NovelStatus::Unknown,
+                genres: Vec::new(),
+                rating: None,
+                popularity: 0,
+                chapter_count: None,
+                last_updated: None,
+                language: self.manifest.language.clone(),
+            });
+        }
+        Ok(items)
+    }
+
+    fn auto_detect_search_url(&self, page_url: &str, html: &str, q: &str) -> Option<String> {
+        let doc = Html::parse_document(html);
+        let form_sel = Selector::parse("form").ok()?;
+        let input_sel = Selector::parse("input[name]").ok()?;
+        let base_parsed = Url::parse(page_url).ok();
+
+        for form in doc.select(&form_sel) {
+            let method = form.value().attr("method").unwrap_or("get").to_ascii_lowercase();
+            if method != "get" {
+                continue;
+            }
+            let input_name = form
+                .select(&input_sel)
+                .filter_map(|inp| {
+                    let typ = inp.value().attr("type").unwrap_or("text").to_ascii_lowercase();
+                    let name = inp.value().attr("name")?;
+                    if matches!(typ.as_str(), "search" | "text" | "")
+                        && matches!(
+                            name.to_ascii_lowercase().as_str(),
+                            "q" | "query" | "s" | "search" | "keyword" | "keywords" | "term"
+                        )
+                    {
+                        Some(name.to_string())
+                    } else {
+                        None
+                    }
+                })
+                .next()
+                .or_else(|| {
+                    form.select(&input_sel)
+                        .find(|inp| {
+                            inp.value()
+                                .attr("type")
+                                .is_some_and(|t| t.eq_ignore_ascii_case("search"))
+                        })
+                        .and_then(|inp| inp.value().attr("name").map(str::to_string))
+                });
+            let Some(param) = input_name else { continue };
+            let action = form.value().attr("action").unwrap_or(page_url);
+            let action_abs = self.resolve_url(page_url, action);
+            if let (Some(bp), Ok(mut u)) = (&base_parsed, Url::parse(&action_abs)) {
+                if u.host_str() == bp.host_str() {
+                    u.query_pairs_mut().append_pair(&param, q);
+                    return Some(u.to_string());
+                }
+            }
+        }
+        None
+    }
+
+    fn auto_parse_html_list(&self, page_url: &str, html: &str) -> (Vec<NovelSummary>, bool, Option<String>) {
+        let doc = Html::parse_document(html);
+        let html_lang = extract_html_lang(&doc);
+        let effective_lang = self.manifest.language.clone().or(html_lang.clone());
+        let page_base = Url::parse(page_url).ok();
+
+        let is_valid_card_link = |href: &str, text: &str| -> bool {
+            let h = href.trim();
+            if h.is_empty() || h.starts_with('#') || h.starts_with("javascript:") || h.starts_with("mailto:") {
+                return false;
+            }
+            let tl = text.trim();
+            if tl.len() < 2 || tl.len() > 160 {
+                return false;
+            }
+            let low = h.to_ascii_lowercase();
+            let t_low = tl.to_ascii_lowercase();
+            let skip_href = [
+                "/login", "/register", "/signup", "/privacy", "/terms", "/about",
+                "/contact", "/tag/", "/genre/", "/author/", "/search?", "?page=",
+            ];
+            let skip_text = ["next", "prev", "previous", "home", "login", "sign in", "register"];
+            !skip_href.iter().any(|p| low.contains(p))
+                && !skip_text.contains(&t_low.as_str())
+                && page_base
+                    .as_ref()
+                    .and_then(|b| b.join(h).ok())
+                    .map(|u| page_base.as_ref().is_none_or(|b| u.host_str() == b.host_str()))
+                    .unwrap_or(true)
         };
-        self.cache.put(&novel_id, &parsed)
+
+        let link_sel = Selector::parse("a[href]").unwrap();
+        let heading_sel = Selector::parse("h1, h2, h3, h4, .title, .book-title, .post-title, .novel-title").unwrap();
+        let desc_sel = Selector::parse(".desc, .description, .summary, p").unwrap();
+        let img_sel = Selector::parse("img").unwrap();
+
+        let card_selectors = [
+            "li.novel-item",
+            ".page-item-detail",
+            ".list-novel .row",
+            ".novel-list li",
+            ".book-list li",
+            ".search-item",
+            "article",
+            ".card",
+            ".grid > div",
+            "main li",
+        ];
+
+        let mut best_items: Vec<NovelSummary> = Vec::new();
+        for sel_str in card_selectors {
+            let Ok(sel) = Selector::parse(sel_str) else { continue };
+            let mut items = Vec::new();
+            let mut seen = HashSet::new();
+            for card in doc.select(&sel) {
+                let Some(a) = card.select(&link_sel).find(|a| {
+                    let href = a.value().attr("href").unwrap_or("");
+                    let txt = collapse_ws(&a.text().collect::<String>());
+                    !href.is_empty() && !href.starts_with('#') && (!txt.is_empty() || card.select(&heading_sel).next().is_some())
+                }) else {
+                    continue;
+                };
+                let href = a.value().attr("href").unwrap_or("");
+                let heading_title = card
+                    .select(&heading_sel)
+                    .next()
+                    .map(|e| collapse_ws(&e.text().collect::<String>()))
+                    .unwrap_or_default();
+                let link_title = collapse_ws(&a.text().collect::<String>());
+                let title = if !heading_title.is_empty() {
+                    heading_title
+                } else {
+                    link_title
+                };
+                if !is_valid_card_link(href, &title) {
+                    continue;
+                }
+                let novel_url = self.resolve_url(page_url, href);
+                if !seen.insert(novel_url.clone()) {
+                    continue;
+                }
+                let author = extract_html_card_author(&card, None)
+                    .unwrap_or_else(|| "Unknown Author".into());
+                let cover_url = card
+                    .select(&img_sel)
+                    .next()
+                    .and_then(|e| self.extract_cover_attr(page_url, e));
+                let description = card
+                    .select(&desc_sel)
+                    .next()
+                    .map(|e| collapse_ws(&e.text().collect::<String>()))
+                    .unwrap_or_default();
+                items.push(NovelSummary {
+                    id: make_novel_id(self.id(), &novel_url),
+                    source_id: self.id().to_string(),
+                    external_id: novel_url,
+                    title,
+                    author,
+                    description,
+                    cover_url,
+                    local_cover_path: None,
+                    status: NovelStatus::Unknown,
+                    genres: Vec::new(),
+                    rating: None,
+                    popularity: 0,
+                    chapter_count: None,
+                    last_updated: None,
+                    language: effective_lang.clone(),
+                });
+            }
+            if items.len() >= 2 {
+                best_items = items;
+                break;
+            } else if best_items.is_empty() && !items.is_empty() {
+                best_items = items;
+            }
+        }
+
+        if best_items.is_empty() {
+            let container_sel = Selector::parse("main a[href], #content a[href], .content a[href], body a[href]").unwrap();
+            let mut seen = HashSet::new();
+            for a in doc.select(&container_sel) {
+                let in_chrome = a.ancestors().any(|anc| {
+                    anc.value()
+                        .as_element()
+                        .is_some_and(|el| matches!(el.name(), "nav" | "header" | "footer" | "aside"))
+                });
+                if in_chrome {
+                    continue;
+                }
+                let Some(href) = a.value().attr("href") else { continue };
+                let title = collapse_ws(&a.text().collect::<String>());
+                if !is_valid_card_link(href, &title) {
+                    continue;
+                }
+                let novel_url = self.resolve_url(page_url, href);
+                if novel_url.trim_end_matches('/') == page_url.trim_end_matches('/')
+                    || !seen.insert(novel_url.clone())
+                {
+                    continue;
+                }
+                best_items.push(NovelSummary {
+                    id: make_novel_id(self.id(), &novel_url),
+                    source_id: self.id().to_string(),
+                    external_id: novel_url,
+                    title,
+                    author: "Unknown Author".into(),
+                    description: String::new(),
+                    cover_url: None,
+                    local_cover_path: None,
+                    status: NovelStatus::Unknown,
+                    genres: Vec::new(),
+                    rating: None,
+                    popularity: 0,
+                    chapter_count: None,
+                    last_updated: None,
+                    language: effective_lang.clone(),
+                });
+                if best_items.len() >= 60 {
+                    break;
+                }
+            }
+        }
+
+        let has_next = Selector::parse("link[rel='next'], a[rel='next'], a.next, .pagination .next a")
+            .ok()
+            .is_some_and(|sel| doc.select(&sel).next().is_some());
+        (best_items, has_next, html_lang)
+    }
+
+    fn auto_extract_prose(&self, html: &str) -> (String, Vec<String>, i64) {
+        let doc = Html::parse_document(html);
+        let custom_rm: Vec<&str> = self.manifest.remove_selectors.iter().map(String::as_str).collect();
+        let default_rm = [
+            "script", "style", "noscript", "nav", "header", "footer", "aside",
+            ".ads", ".advertisement", ".comments", "#comments", ".share", ".social",
+        ];
+        let mut all_rm: Vec<&str> = default_rm.to_vec();
+        all_rm.extend(custom_rm);
+
+        if let Some(ref sel_str) = self.manifest.content_selector {
+            if let Ok(sel) = Selector::parse(sel_str) {
+                if let Some(el) = doc.select(&sel).next() {
+                    return clean_html_fragment_excluding(&el.inner_html(), &all_rm);
+                }
+            }
+        }
+
+        let candidates = [
+            "#chapter-content",
+            ".chapter-content",
+            "#chr-content",
+            ".reading-content .text-left",
+            ".reading-content",
+            ".chapter-inner",
+            ".entry-content",
+            ".post-content",
+            "article",
+            "main",
+            "body",
+        ];
+        let p_sel = Selector::parse("p").unwrap();
+        let mut best_html: Option<String> = None;
+        let mut best_score = 0usize;
+
+        for sel_str in candidates {
+            let Ok(sel) = Selector::parse(sel_str) else { continue };
+            for el in doc.select(&sel) {
+                let p_len: usize = el
+                    .select(&p_sel)
+                    .map(|p| p.text().collect::<String>().trim().len())
+                    .sum();
+                let score = if p_len > 0 {
+                    p_len
+                } else {
+                    el.text().collect::<String>().trim().len()
+                };
+                if score > best_score {
+                    best_score = score;
+                    best_html = Some(el.inner_html());
+                }
+            }
+            if best_score >= 200 && sel_str != "article" && sel_str != "main" && sel_str != "body" {
+                break;
+            }
+        }
+
+        clean_html_fragment_excluding(best_html.as_deref().unwrap_or(html), &all_rm)
+    }
+}
+
+fn collapse_ws(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn extract_html_lang(doc: &Html) -> Option<String> {
+    let sel = Selector::parse("html[lang]").ok()?;
+    let raw = doc.select(&sel).next()?.value().attr("lang")?;
+    normalize_ia_lang_str(raw)
+}
+
+fn first_selector_text(doc: &Html, selectors: &[&str]) -> Option<String> {
+    for sel_str in selectors {
+        let Ok(sel) = Selector::parse(sel_str) else { continue };
+        for el in doc.select(&sel) {
+            let txt = collapse_ws(&el.text().collect::<String>());
+            if !txt.is_empty() {
+                return Some(txt);
+            }
+        }
+    }
+    None
+}
+
+fn first_meta_content(doc: &Html, selectors: &[&str]) -> Option<String> {
+    for sel_str in selectors {
+        let Ok(sel) = Selector::parse(sel_str) else { continue };
+        if let Some(val) = doc
+            .select(&sel)
+            .next()
+            .and_then(|e| e.value().attr("content"))
+            .map(collapse_ws)
+            .filter(|s| !s.is_empty())
+        {
+            return Some(val);
+        }
+    }
+    None
+}
+
+fn sort_chapters_ascending(chapters: &mut [Chapter]) {
+    if chapters.len() < 2 {
+        return;
+    }
+    let first_num = extract_chapter_order_num(
+        &chapters[0].title,
+        chapters[0].url.as_deref().unwrap_or(""),
+    );
+    let last = chapters.len() - 1;
+    let last_num = extract_chapter_order_num(
+        &chapters[last].title,
+        chapters[last].url.as_deref().unwrap_or(""),
+    );
+    if let (Some(a), Some(b)) = (first_num, last_num) {
+        if a > b {
+            chapters.reverse();
+            for (idx, ch) in chapters.iter_mut().enumerate() {
+                ch.chapter_number = (idx + 1) as f64;
+            }
+        }
     }
 }
 
@@ -372,6 +891,7 @@ impl NovelSource for DeclarativeSource {
         match self.manifest.kind {
             DeclarativeKind::Opds => "opds",
             DeclarativeKind::Html => "declarative_html",
+            DeclarativeKind::Auto => "auto",
         }
     }
 
@@ -389,10 +909,12 @@ impl NovelSource for DeclarativeSource {
 
     fn capabilities(&self) -> SourceCapabilities {
         SourceCapabilities {
-            search: self.manifest.search_url_template.is_some()
+            search: matches!(self.manifest.kind, DeclarativeKind::Auto)
+                || self.manifest.search_url_template.is_some()
                 || self.manifest.feed_url.is_some()
                 || self.manifest.browse_url_template.is_some(),
-            browse_popular: self.manifest.feed_url.is_some()
+            browse_popular: matches!(self.manifest.kind, DeclarativeKind::Auto)
+                || self.manifest.feed_url.is_some()
                 || self.manifest.browse_url_template.is_some(),
             browse_trending: false,
             browse_latest: false,
@@ -407,17 +929,17 @@ impl NovelSource for DeclarativeSource {
         query: &DiscoveryQuery,
         _config: &HashMap<String, Value>,
     ) -> AppResult<(Vec<NovelSummary>, bool, Option<u64>)> {
-        if let Some(req_lang) = query
+        let req_lang = query
             .language
             .as_deref()
             .map(str::trim)
-            .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("all"))
-        {
+            .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("all"));
+        if let Some(req_lang) = req_lang {
             if let Some(ref src_lang) = self.manifest.language {
                 if !src_lang.eq_ignore_ascii_case(req_lang) {
                     return Ok((Vec::new(), false, None));
                 }
-            } else {
+            } else if !matches!(self.manifest.kind, DeclarativeKind::Auto) {
                 return Ok((Vec::new(), false, None));
             }
         }
@@ -432,6 +954,8 @@ impl NovelSource for DeclarativeSource {
                 .or(self.manifest.browse_url_template.as_deref())
             {
                 (self.apply_template(tpl, query), Some(tpl))
+            } else if matches!(self.manifest.kind, DeclarativeKind::Auto) {
+                (self.manifest.base_url.clone(), None)
             } else {
                 return Err(AppError::Source {
                     source_id: self.id().into(),
@@ -449,10 +973,26 @@ impl NovelSource for DeclarativeSource {
             (self.manifest.base_url.clone(), None)
         };
 
-        let body = self.http.get_text(&target_url).await?;
+        let mut final_url = target_url;
+        let mut body = self.http.get_text(&final_url).await?;
+        let mut used_remote_search = self.manifest.search_url_template.is_some();
+
+        // For Auto sources without an explicit search template, try any GET search form on the base page.
+        if matches!(self.manifest.kind, DeclarativeKind::Auto) && !used_remote_search {
+            if let Some(q) = trimmed_q {
+                if let Some(search_url) = self.auto_detect_search_url(&final_url, &body, q) {
+                    if let Ok(search_body) = self.http.get_text(&search_url).await {
+                        final_url = search_url;
+                        body = search_body;
+                        used_remote_search = true;
+                    }
+                }
+            }
+        }
+
         let filter_local = |items: &mut Vec<NovelSummary>| {
             if let Some(q) = trimmed_q {
-                if self.manifest.search_url_template.is_none() {
+                if !used_remote_search {
                     let q_low = q.to_ascii_lowercase();
                     items.retain(|it| {
                         it.title.to_ascii_lowercase().contains(&q_low)
@@ -464,15 +1004,50 @@ impl NovelSource for DeclarativeSource {
 
         match self.manifest.kind {
             DeclarativeKind::Opds => {
-                let (mut items, has_next) = self.parse_opds_feed(&target_url, &body)?;
+                let (mut items, has_next) = self.parse_opds_feed(&final_url, &body)?;
                 filter_local(&mut items);
                 Ok((items, has_next, None))
             }
             DeclarativeKind::Html => {
-                let mut items = self.parse_html_list(&target_url, &body)?;
+                let mut items = self.parse_html_list(&final_url, &body)?;
                 filter_local(&mut items);
                 let has_next = !items.is_empty()
                     && used_tpl.is_some_and(|tpl| tpl.contains("{page"));
+                Ok((items, has_next, None))
+            }
+            DeclarativeKind::Auto => {
+                let head = body.trim_start();
+                let is_atom = (head.starts_with("<?xml") || head.starts_with("<feed"))
+                    && body.contains("<entry");
+                let is_rss = (head.starts_with("<?xml") || head.starts_with("<rss"))
+                    && body.contains("<channel")
+                    && body.contains("<item");
+
+                let (mut items, mut has_next, detected_lang) = if is_atom {
+                    let (it, next) = self.parse_opds_feed(&final_url, &body)?;
+                    (it, next, self.manifest.language.clone())
+                } else if is_rss {
+                    (self.parse_rss_feed(&final_url, &body)?, false, self.manifest.language.clone())
+                } else if self.manifest.novel_list_selector.is_some() {
+                    let it = self.parse_html_list(&final_url, &body)?;
+                    let next = !it.is_empty()
+                        && used_tpl.is_some_and(|tpl| tpl.contains("{page"));
+                    (it, next, self.manifest.language.clone())
+                } else {
+                    self.auto_parse_html_list(&final_url, &body)
+                };
+
+                if let Some(req_l) = req_lang {
+                    if let Some(ref dl) = detected_lang {
+                        if !dl.eq_ignore_ascii_case(req_l) {
+                            return Ok((Vec::new(), false, None));
+                        }
+                    }
+                }
+                filter_local(&mut items);
+                if used_tpl.is_some_and(|tpl| tpl.contains("{page")) && !items.is_empty() {
+                    has_next = true;
+                }
                 Ok((items, has_next, None))
             }
         }
@@ -484,43 +1059,42 @@ impl NovelSource for DeclarativeSource {
         _config: &HashMap<String, Value>,
     ) -> AppResult<NovelRecord> {
         let now = Utc::now().to_rfc3339();
+        let make_epub_record = |novel_id: String, parsed: ParsedBook| NovelRecord {
+            id: novel_id,
+            source_id: self.id().to_string(),
+            external_id: external_id.to_string(),
+            title: parsed.title,
+            author_id: None,
+            author: parsed.author,
+            description: parsed.description,
+            cover_url: None,
+            local_cover_path: None,
+            status: NovelStatus::Completed,
+            genres: parsed.genres,
+            tags: parsed.tags,
+            rating: parsed.rating,
+            popularity: 0,
+            chapter_count: parsed.chapters.len() as i64,
+            last_updated_remote: None,
+            metadata: self
+                .manifest
+                .language
+                .as_deref()
+                .map(|lang| serde_json::json!({ "language": lang }))
+                .unwrap_or_else(|| serde_json::json!({})),
+            is_local: false,
+            created_at: now.clone(),
+            updated_at: now.clone(),
+        };
+
         match self.manifest.kind {
             DeclarativeKind::Opds => {
                 let bytes = self.http.get_bytes(external_id).await?;
-                let parsed = if bytes.starts_with(b"PK") {
-                    parse_epub_bytes(&bytes, external_id)?
-                } else {
-                    parse_html_bytes(&bytes, external_id)?
-                };
                 let novel_id = make_novel_id(self.id(), external_id);
-                self.cache.put(&novel_id, &parsed)?;
-                Ok(NovelRecord {
-                    id: novel_id,
-                    source_id: self.id().to_string(),
-                    external_id: external_id.to_string(),
-                    title: parsed.title,
-                    author_id: None,
-                    author: parsed.author,
-                    description: parsed.description,
-                    cover_url: None,
-                    local_cover_path: None,
-                    status: NovelStatus::Completed,
-                    genres: parsed.genres,
-                    tags: parsed.tags,
-                    rating: parsed.rating,
-                    popularity: 0,
-                    chapter_count: parsed.chapters.len() as i64,
-                    last_updated_remote: None,
-                    metadata: self
-                        .manifest
-                        .language
-                        .as_deref()
-                        .map(|lang| serde_json::json!({ "language": lang }))
-                        .unwrap_or_else(|| serde_json::json!({})),
-                    is_local: false,
-                    created_at: now.clone(),
-                    updated_at: now,
-                })
+                let parsed = self
+                    .parse_and_cache_book_bytes(&novel_id, external_id, &bytes)?
+                    .0;
+                Ok(make_epub_record(novel_id, parsed))
             }
             DeclarativeKind::Html => {
                 let html = self.http.get_text(external_id).await?;
@@ -583,6 +1157,112 @@ impl NovelSource for DeclarativeSource {
                     updated_at: now,
                 })
             }
+            DeclarativeKind::Auto => {
+                let bytes = self.http.get_bytes(external_id).await?;
+                let novel_id = make_novel_id(self.id(), external_id);
+                if bytes.starts_with(b"PK") {
+                    let parsed = self
+                        .parse_and_cache_book_bytes(&novel_id, external_id, &bytes)?
+                        .0;
+                    return Ok(make_epub_record(novel_id, parsed));
+                }
+                let html = String::from_utf8_lossy(&bytes).into_owned();
+                let doc = Html::parse_document(&html);
+                let title = self
+                    .manifest
+                    .title_selector
+                    .as_deref()
+                    .and_then(|s| Selector::parse(s).ok())
+                    .and_then(|sel| doc.select(&sel).next())
+                    .map(|e| collapse_ws(&e.text().collect::<String>()))
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| {
+                        first_selector_text(
+                            &doc,
+                            &["h1", ".novel-title", ".book-title", ".post-title", ".entry-title"],
+                        )
+                    })
+                    .or_else(|| first_meta_content(&doc, &["meta[property='og:title']"]))
+                    .or_else(|| first_selector_text(&doc, &["title"]))
+                    .unwrap_or_else(|| external_id.to_string());
+                let author = extract_html_detail_author(
+                    &doc,
+                    self.manifest.author_selector.as_deref(),
+                )
+                .unwrap_or_else(|| "Unknown Author".into());
+                let description = self
+                    .manifest
+                    .description_selector
+                    .as_deref()
+                    .and_then(|s| Selector::parse(s).ok())
+                    .and_then(|sel| doc.select(&sel).next())
+                    .map(|e| collapse_ws(&e.text().collect::<String>()))
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| {
+                        first_selector_text(
+                            &doc,
+                            &[
+                                ".summary__content",
+                                ".summary .content",
+                                ".synopsis",
+                                ".description",
+                                ".book-description",
+                                "#description",
+                            ],
+                        )
+                    })
+                    .or_else(|| {
+                        first_meta_content(
+                            &doc,
+                            &["meta[name='description']", "meta[property='og:description']"],
+                        )
+                    })
+                    .unwrap_or_default();
+                let cover_url = self
+                    .manifest
+                    .cover_selector
+                    .as_deref()
+                    .and_then(|s| Selector::parse(s).ok())
+                    .and_then(|sel| doc.select(&sel).next())
+                    .and_then(|e| self.extract_cover_attr(external_id, e))
+                    .or_else(|| first_meta_content(&doc, &["meta[property='og:image']"]).map(|u| self.resolve_url(external_id, &u)))
+                    .or_else(|| {
+                        Selector::parse(".summary_image img, .book-cover img, .cover img, .novel-cover img, article img, main img")
+                            .ok()
+                            .and_then(|sel| doc.select(&sel).next())
+                            .and_then(|e| self.extract_cover_attr(external_id, e))
+                    });
+                let lang = self
+                    .manifest
+                    .language
+                    .clone()
+                    .or_else(|| extract_html_lang(&doc));
+
+                Ok(NovelRecord {
+                    id: novel_id,
+                    source_id: self.id().to_string(),
+                    external_id: external_id.to_string(),
+                    title,
+                    author_id: None,
+                    author,
+                    description,
+                    cover_url,
+                    local_cover_path: None,
+                    status: NovelStatus::Unknown,
+                    genres: Vec::new(),
+                    tags: vec![self.name().to_string()],
+                    rating: None,
+                    popularity: 0,
+                    chapter_count: 0,
+                    last_updated_remote: None,
+                    metadata: lang
+                        .map(|l| serde_json::json!({ "language": l }))
+                        .unwrap_or_else(|| serde_json::json!({})),
+                    is_local: false,
+                    created_at: now.clone(),
+                    updated_at: now,
+                })
+            }
         }
     }
 
@@ -592,27 +1272,30 @@ impl NovelSource for DeclarativeSource {
         _config: &HashMap<String, Value>,
     ) -> AppResult<Vec<Chapter>> {
         let novel_id = make_novel_id(self.id(), external_id);
+        let chapters_from_cached = |cached: CachedParsedBook| -> Vec<Chapter> {
+            cached
+                .chapters
+                .into_iter()
+                .map(|c| Chapter {
+                    id: make_chapter_id(&novel_id, &c.external_id),
+                    novel_id: novel_id.clone(),
+                    external_id: c.external_id,
+                    chapter_number: c.chapter_number,
+                    volume: None,
+                    title: c.title,
+                    url: None,
+                    word_count: c.word_count,
+                    published_at: None,
+                    is_downloaded: false,
+                    local_path: None,
+                    size_bytes: 0,
+                })
+                .collect()
+        };
+
         match self.manifest.kind {
             DeclarativeKind::Opds => {
-                let parsed = self.ensure_opds_parsed(external_id).await?;
-                Ok(parsed
-                    .chapters
-                    .into_iter()
-                    .map(|c| Chapter {
-                        id: make_chapter_id(&novel_id, &c.external_id),
-                        novel_id: novel_id.clone(),
-                        external_id: c.external_id,
-                        chapter_number: c.chapter_number,
-                        volume: None,
-                        title: c.title,
-                        url: None,
-                        word_count: c.word_count,
-                        published_at: None,
-                        is_downloaded: false,
-                        local_path: None,
-                        size_bytes: 0,
-                    })
-                    .collect())
+                Ok(chapters_from_cached(self.ensure_opds_parsed(external_id).await?))
             }
             DeclarativeKind::Html => {
                 let html = self.http.get_text(external_id).await?;
@@ -676,25 +1359,154 @@ impl NovelSource for DeclarativeSource {
                         size_bytes: 0,
                     });
                 }
-                if chapters.len() >= 2 {
-                    let first_num = extract_chapter_order_num(
-                        &chapters[0].title,
-                        chapters[0].url.as_deref().unwrap_or(""),
-                    );
-                    let last = chapters.len() - 1;
-                    let last_num = extract_chapter_order_num(
-                        &chapters[last].title,
-                        chapters[last].url.as_deref().unwrap_or(""),
-                    );
-                    if let (Some(a), Some(b)) = (first_num, last_num) {
-                        if a > b {
-                            chapters.reverse();
-                            for (idx, ch) in chapters.iter_mut().enumerate() {
-                                ch.chapter_number = (idx + 1) as f64;
+                sort_chapters_ascending(&mut chapters);
+                Ok(chapters)
+            }
+            DeclarativeKind::Auto => {
+                if let Some(cached) = self.cache.get(&novel_id) {
+                    if !cached.chapters.is_empty() {
+                        return Ok(chapters_from_cached(cached));
+                    }
+                }
+                let bytes = self.http.get_bytes(external_id).await?;
+                if bytes.starts_with(b"PK") {
+                    let cached = self
+                        .parse_and_cache_book_bytes(&novel_id, external_id, &bytes)?
+                        .1;
+                    return Ok(chapters_from_cached(cached));
+                }
+                let html = String::from_utf8_lossy(&bytes).into_owned();
+                let doc = Html::parse_document(&html);
+                let base_parsed = Url::parse(external_id).ok();
+                let novel_path = base_parsed
+                    .as_ref()
+                    .map(|u| u.path().trim_end_matches('/').to_string())
+                    .unwrap_or_default();
+
+                let mut chapters = Vec::new();
+                let mut seen_urls = HashSet::new();
+                let custom_sels: Vec<&str> = self
+                    .manifest
+                    .chapter_list_selector
+                    .iter()
+                    .map(String::as_str)
+                    .chain([
+                        "ul.chapter-list li a[href]",
+                        "li.wp-manga-chapter a[href]",
+                        "#list-chapter a[href]",
+                        ".list-chapter a[href]",
+                        ".chapter-list a[href]",
+                        ".chapters a[href]",
+                        "ol.toc a[href]",
+                        ".toc a[href]",
+                        "ul.chapters li a[href]",
+                    ])
+                    .collect();
+
+                for sel_str in custom_sels {
+                    let Ok(sel) = Selector::parse(sel_str) else { continue };
+                    for a in doc.select(&sel) {
+                        let Some(href) = a.value().attr("href") else { continue };
+                        let ch_url = self.resolve_url(external_id, href);
+                        if ch_url == external_id || !seen_urls.insert(ch_url.clone()) {
+                            continue;
+                        }
+                        let title = collapse_ws(&a.text().collect::<String>());
+                        let title = if title.is_empty() {
+                            format!("Chapter {}", chapters.len() + 1)
+                        } else {
+                            title
+                        };
+                        chapters.push(Chapter {
+                            id: make_chapter_id(&novel_id, &ch_url),
+                            novel_id: novel_id.clone(),
+                            external_id: ch_url.clone(),
+                            chapter_number: (chapters.len() + 1) as f64,
+                            volume: None,
+                            title,
+                            url: Some(ch_url),
+                            word_count: 0,
+                            published_at: None,
+                            is_downloaded: false,
+                            local_path: None,
+                            size_bytes: 0,
+                        });
+                    }
+                    if !chapters.is_empty() {
+                        break;
+                    }
+                }
+
+                if chapters.is_empty() {
+                    if let Ok(a_sel) = Selector::parse("main a[href], #content a[href], article a[href], body a[href]") {
+                        for a in doc.select(&a_sel) {
+                            let Some(href) = a.value().attr("href") else { continue };
+                            if href.starts_with('#') || href.starts_with("javascript:") {
+                                continue;
                             }
+                            let ch_url = self.resolve_url(external_id, href);
+                            if ch_url.trim_end_matches('/') == external_id.trim_end_matches('/') {
+                                continue;
+                            }
+                            let title = collapse_ws(&a.text().collect::<String>());
+                            let t_low = title.to_ascii_lowercase();
+                            let u_low = ch_url.to_ascii_lowercase();
+                            let same_host = Url::parse(&ch_url)
+                                .ok()
+                                .zip(base_parsed.as_ref())
+                                .is_some_and(|(u, b)| u.host_str() == b.host_str());
+                            let sub_path = !novel_path.is_empty()
+                                && u_low.contains(&novel_path.to_ascii_lowercase())
+                                && u_low.len() > novel_path.len() + 1;
+                            let looks_chapter = sub_path
+                                || ["chapter", "chap", "ch-", "/ch/", "episode", "part-"]
+                                    .iter()
+                                    .any(|kw| t_low.contains(kw) || u_low.contains(kw));
+                            if !same_host || !looks_chapter || title.is_empty() || !seen_urls.insert(ch_url.clone()) {
+                                continue;
+                            }
+                            chapters.push(Chapter {
+                                id: make_chapter_id(&novel_id, &ch_url),
+                                novel_id: novel_id.clone(),
+                                external_id: ch_url.clone(),
+                                chapter_number: (chapters.len() + 1) as f64,
+                                volume: None,
+                                title,
+                                url: Some(ch_url),
+                                word_count: 0,
+                                published_at: None,
+                                is_downloaded: false,
+                                local_path: None,
+                                size_bytes: 0,
+                            });
                         }
                     }
                 }
+
+                // Single-page story / essay fallback if no TOC links exist on the page.
+                if chapters.is_empty() {
+                    let (_, _, wc) = self.auto_extract_prose(&html);
+                    if wc >= 8 {
+                        let title = first_selector_text(&doc, &["h1", "title"])
+                            .unwrap_or_else(|| "Chapter 1".into());
+                        chapters.push(Chapter {
+                            id: make_chapter_id(&novel_id, external_id),
+                            novel_id,
+                            external_id: external_id.to_string(),
+                            chapter_number: 1.0,
+                            volume: None,
+                            title,
+                            url: Some(external_id.to_string()),
+                            word_count: wc,
+                            published_at: None,
+                            is_downloaded: false,
+                            local_path: None,
+                            size_bytes: 0,
+                        });
+                    }
+                }
+
+                sort_chapters_ascending(&mut chapters);
                 Ok(chapters)
             }
         }
@@ -741,6 +1553,21 @@ impl NovelSource for DeclarativeSource {
                     .map(|s| s.as_str())
                     .collect();
                 Ok(clean_html_fragment_excluding(&inner, &rm_refs))
+            }
+            DeclarativeKind::Auto => {
+                let novel_id = make_novel_id(self.id(), external_novel_id);
+                if let Some(cached) = self.cache.get(&novel_id) {
+                    if let Some(ch) = cached
+                        .chapters
+                        .into_iter()
+                        .find(|c| c.external_id == external_chapter_id)
+                    {
+                        return Ok((ch.html, ch.paragraphs, ch.word_count));
+                    }
+                }
+                let target = chapter_url.unwrap_or(external_chapter_id);
+                let html = self.http.get_text(target).await?;
+                Ok(self.auto_extract_prose(&html))
             }
         }
     }
@@ -869,6 +1696,9 @@ fn extract_html_card_author(card: &ElementRef<'_>, explicit: Option<&Selector>) 
         ".author",
         ".book-author",
         ".novel-author",
+        ".byline a",
+        ".byline",
+        "[rel='author']",
         "a[href*='/author']",
         "a[href*='author=']",
     ];
@@ -1078,8 +1908,13 @@ mod tests {
         assert_eq!(paras, vec!["Mist drifted over the valley."]);
         assert_eq!(wc, 5);
 
-        // Robots.txt enforcement rejects /secret
-        let res = http.get_text(&format!("{base}/secret/page")).await;
+        // Robots.txt checks are disabled by default; opt-in enforcement still rejects /secret
+        assert!(!matches!(
+            http.get_text(&format!("{base}/secret/page")).await,
+            Err(AppError::RobotsDisallowed(_))
+        ));
+        let strict_http = http.clone().with_robots_enforcement(true);
+        let res = strict_http.get_text(&format!("{base}/secret/page")).await;
         assert!(matches!(res, Err(AppError::RobotsDisallowed(_))));
 
         server_handle.abort();
@@ -1384,5 +2219,244 @@ mod tests {
             extract_html_detail_author(&dirty_span, Some(".author")).as_deref(),
             Some("Aravind_S")
         );
+    }
+
+    #[tokio::test]
+    async fn test_auto_url_parser_discovers_lists_opds_chapters_and_single_page() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let base = format!("http://{addr}");
+
+        let server_handle = tokio::spawn(async move {
+            for _ in 0..16 {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    let path = req
+                        .lines()
+                        .next()
+                        .and_then(|l| l.split_whitespace().nth(1))
+                        .unwrap_or("/");
+
+                    let (status, ctype, body) = if path == "/robots.txt" {
+                        ("200 OK", "text/plain", "User-agent: *\nAllow: /\n".to_string())
+                    } else if path == "/" {
+                        (
+                            "200 OK",
+                            "text/html",
+                            r#"<html lang="en"><body>
+                                <form method="get" action="/find"><input type="search" name="q" /></form>
+                                <article>
+                                    <a href="/book/starlight"><h3>Starlight</h3></a>
+                                    <span class="byline">By Vera Holt</span>
+                                    <p>Among quiet constellations.</p>
+                                </article>
+                                <article>
+                                    <a href="/essay/single"><h3>Brief Essay</h3></a>
+                                    <span class="byline">By Sam Moss</span>
+                                </article>
+                                <a rel="next" href="/?page=2">Next</a>
+                            </body></html>"#
+                                .to_string(),
+                        )
+                    } else if path.starts_with("/find?q=star") {
+                        (
+                            "200 OK",
+                            "text/html",
+                            r#"<html lang="en"><body>
+                                <article>
+                                    <a href="/book/starlight"><h3>Starlight</h3></a>
+                                    <span class="byline">By Vera Holt</span>
+                                </article>
+                            </body></html>"#
+                                .to_string(),
+                        )
+                    } else if path == "/book/starlight" {
+                        (
+                            "200 OK",
+                            "text/html",
+                            r#"<html lang="en"><body>
+                                <h1>Starlight</h1>
+                                <span class="author">Vera Holt</span>
+                                <div class="synopsis">Far above earth.</div>
+                                <ul class="chapters">
+                                    <li><a href="/book/starlight/ch-2">Chapter 2</a></li>
+                                    <li><a href="/book/starlight/ch-1">Chapter 1</a></li>
+                                </ul>
+                            </body></html>"#
+                                .to_string(),
+                        )
+                    } else if path == "/book/starlight/ch-1" {
+                        (
+                            "200 OK",
+                            "text/html",
+                            r#"<html><body>
+                                <nav>Site menu</nav>
+                                <div id="chapter-content">
+                                    <p>The lantern flickered in the cold observatory dome.</p>
+                                    <div class="ads">Sponsored link</div>
+                                </div>
+                            </body></html>"#
+                                .to_string(),
+                        )
+                    } else if path == "/essay/single" {
+                        (
+                            "200 OK",
+                            "text/html",
+                            r#"<html><body><article><h1>Brief Essay</h1><p>This short stand-alone essay has plenty of readable prose for automatic chapter detection.</p></article></body></html>"#
+                                .to_string(),
+                        )
+                    } else if path == "/feed.opds" {
+                        (
+                            "200 OK",
+                            "application/atom+xml",
+                            r#"<?xml version="1.0" encoding="utf-8"?>
+                            <feed xmlns="http://www.w3.org/2005/Atom">
+                                <title>Auto OPDS</title>
+                                <entry>
+                                    <title>Auto Feed Novel</title>
+                                    <author><name>Ada Doe</name></author>
+                                    <link rel="http://opds-spec.org/acquisition" type="text/html" href="/essay/single"/>
+                                </entry>
+                            </feed>"#
+                                .to_string(),
+                        )
+                    } else {
+                        ("404 Not Found", "text/plain", "Not Found".to_string())
+                    };
+
+                    let resp = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+
+        let http = SourceHttpClient::new().unwrap();
+        let cache_dir = tempfile::tempdir().unwrap();
+        let cache = ParsedBookCache::new(cache_dir.path().to_path_buf());
+        let manifest = DeclarativeSourceManifest::from_url(&base);
+        assert!(manifest.id.starts_with("auto_127_0_0_1"));
+        assert_eq!(manifest.kind, DeclarativeKind::Auto);
+        let src = DeclarativeSource::new(manifest, http.clone(), cache.clone());
+
+        let (items, has_more, _) = src
+            .discover(
+                &DiscoveryQuery {
+                    source_id: None,
+                    query: None,
+                    genre: None,
+                    sort: None,
+                    status: None,
+                    language: Some("en".into()),
+                    page: 1,
+                    limit: 20,
+                },
+                &HashMap::new(),
+            )
+            .await
+            .unwrap();
+        assert!(has_more);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].title, "Starlight");
+        assert_eq!(items[0].author, "Vera Holt");
+        assert_eq!(items[0].language.as_deref(), Some("en"));
+
+        let (searched, _, _) = src
+            .discover(
+                &DiscoveryQuery {
+                    source_id: None,
+                    query: Some("star".into()),
+                    genre: None,
+                    sort: None,
+                    status: None,
+                    language: None,
+                    page: 1,
+                    limit: 20,
+                },
+                &HashMap::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(searched.len(), 1);
+
+        let rec = src.get_novel(&items[0].external_id, &HashMap::new()).await.unwrap();
+        assert_eq!(rec.title, "Starlight");
+        assert_eq!(rec.author, "Vera Holt");
+
+        let chs = src.get_chapters(&items[0].external_id, &HashMap::new()).await.unwrap();
+        assert_eq!(chs.len(), 2);
+        assert_eq!(chs[0].title, "Chapter 1");
+
+        let (_, paras, wc) = src
+            .get_chapter_content(&items[0].external_id, &chs[0].external_id, chs[0].url.as_deref(), &HashMap::new())
+            .await
+            .unwrap();
+        assert!(wc > 0);
+        assert!(paras[0].contains("lantern flickered"));
+        assert!(!paras.join(" ").contains("Sponsored"));
+
+        // Single-page story fallback
+        let single_chs = src.get_chapters(&items[1].external_id, &HashMap::new()).await.unwrap();
+        assert_eq!(single_chs.len(), 1);
+
+        // Auto OPDS detection from a feed URL
+        let opds_src = DeclarativeSource::new(
+            DeclarativeSourceManifest::from_url(&format!("{base}/feed.opds")),
+            http.clone(),
+            cache.clone(),
+        );
+        let (feed_items, _, _) = opds_src
+            .discover(
+                &DiscoveryQuery {
+                    source_id: None,
+                    query: None,
+                    genre: None,
+                    sort: None,
+                    status: None,
+                    language: None,
+                    page: 1,
+                    limit: 20,
+                },
+                &HashMap::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(feed_items.len(), 1);
+        assert_eq!(feed_items[0].title, "Auto Feed Novel");
+
+        // Ensure blank string selectors (e.g. "" from UI forms) never trigger EmptySelector
+        let mut blank_sel_manifest = DeclarativeSourceManifest::from_url(&base);
+        blank_sel_manifest.novel_list_selector = Some("".into());
+        blank_sel_manifest.chapter_list_selector = Some("   ".into());
+        blank_sel_manifest.content_selector = Some("".into());
+        blank_sel_manifest.fill_defaults_from_url().unwrap();
+        assert!(blank_sel_manifest.novel_list_selector.is_none());
+        let blank_sel_src = DeclarativeSource::new(blank_sel_manifest, http, cache);
+        let (blank_items, _, _) = blank_sel_src
+            .discover(
+                &DiscoveryQuery {
+                    source_id: None,
+                    query: None,
+                    genre: None,
+                    sort: None,
+                    status: None,
+                    language: None,
+                    page: 1,
+                    limit: 20,
+                },
+                &HashMap::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(blank_items.len(), 2);
+
+        server_handle.abort();
     }
 }

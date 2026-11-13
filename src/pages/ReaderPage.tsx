@@ -28,7 +28,8 @@ import type {
 } from "../types/novel";
 import {
   ANNOTATION_COLORS,
-  IS_MAC,
+  IS_IOS,
+  IS_MAC_DESKTOP,
   estimateReadingMinutes,
   languageLabel,
   swatchForColor,
@@ -55,6 +56,14 @@ const READER_THEMES: Record<
     fg: "#D9DDE6",
     muted: "#7D8596",
     border: "rgba(255,255,255,0.09)",
+    accent: "#818CF8",
+  },
+  amoled: {
+    label: "AMOLED",
+    bg: "#000000",
+    fg: "#E4E6EB",
+    muted: "#717682",
+    border: "rgba(255,255,255,0.12)",
     accent: "#818CF8",
   },
   paper: {
@@ -441,9 +450,18 @@ export const ReaderPage: React.FC<ReaderPageProps> = ({
     totPages: number;
   } | null>(null);
   const pendingStartAtEndRef = useRef(false);
+  const pendingJumpParagraphRef = useRef<{
+    chapterId: string;
+    paragraphIndex: number;
+  } | null>(
+    initialParagraphIndex !== null && initialParagraphIndex !== undefined
+      ? { chapterId: initialChapterId, paragraphIndex: initialParagraphIndex }
+      : null,
+  );
   const restoredForChapterRef = useRef<string | null>(null);
   const restoringScrollRef = useRef(false);
   const restoreGuardTimerRef = useRef<number | null>(null);
+  const touchGestureRef = useRef<{ x: number; y: number } | null>(null);
 
   const setInstantScrollTop = useCallback((container: HTMLElement, top: number) => {
     const target = Math.max(0, top);
@@ -500,6 +518,10 @@ export const ReaderPage: React.FC<ReaderPageProps> = ({
     setLoading(true);
     setErrorMsg(null);
     restoredForChapterRef.current = null;
+    pendingJumpParagraphRef.current =
+      initialParagraphIndex !== null && initialParagraphIndex !== undefined
+        ? { chapterId: initialChapterId, paragraphIndex: initialParagraphIndex }
+        : null;
     prefetchedChaptersRef.current.clear();
 
     Promise.all([
@@ -605,53 +627,119 @@ export const ReaderPage: React.FC<ReaderPageProps> = ({
     [novelId],
   );
 
+  const jumpToParagraphInScroll = useCallback((chapterId: string, paragraphIndex: number) => {
+    setCurrentParagraphIdx(paragraphIndex);
+    setTimeout(() => {
+      const el = document.querySelector(`[data-ch="${chapterId}"][data-p="${paragraphIndex}"]`);
+      if (el && typeof el.scrollIntoView === "function") {
+        el.scrollIntoView({ behavior: "smooth", block: "center" });
+      }
+    }, 60);
+  }, []);
+
+  // Paginated measurement (also resolves any pending paragraph jump once column width settles)
+  const recomputePages = useCallback(() => {
+    if (settings.reader_mode !== "paginated" || loading) return;
+    const vp = paginatedViewportRef.current;
+    const inner = paginatedContentRef.current;
+    if (!vp || !inner) return;
+    const gap = 64;
+    const rectW = vp.getBoundingClientRect().width;
+    const vpWidth =
+      rectW > 0
+        ? rectW
+        : vp.clientWidth > 0
+          ? vp.clientWidth
+          : Math.min(settings.reader_width, 960);
+    const colW = Math.max(240, Math.min(settings.reader_width, vpWidth));
+    if (Math.abs(colW - paginatedColWidth) > 0.25) {
+      setPaginatedColWidth(colW);
+      return;
+    }
+    const stride = colW + gap;
+    setPageStride(stride);
+    const totalW = inner.scrollWidth;
+    const count = Math.max(1, Math.ceil((totalW - 8) / stride));
+    setTotalPages(count);
+
+    const pendingPara = pendingJumpParagraphRef.current;
+    if (pendingPara && activeChapter && pendingPara.chapterId === activeChapter.chapter_id) {
+      pendingJumpParagraphRef.current = null;
+      const el = document.querySelector(
+        `[data-ch="${activeChapter.chapter_id}"][data-p="${pendingPara.paragraphIndex}"]`,
+      );
+      let targetPage = 0;
+      if (el) {
+        vp.scrollLeft = 0;
+        const innerRect = inner.getBoundingClientRect();
+        const elRect = el.getBoundingClientRect();
+        const offsetLeft = Math.max(0, elRect.left - innerRect.left);
+        const rawPage = Math.floor((offsetLeft + 8) / stride);
+        targetPage = Math.max(0, Math.min(count - 1, rawPage));
+      }
+      setCurrentParagraphIdx(pendingPara.paragraphIndex);
+      setPageIndex(targetPage);
+      setScrollPct(count > 1 ? Math.round((targetPage / (count - 1)) * 100) : 0);
+      return;
+    }
+
+    if (pendingStartAtEndRef.current) {
+      pendingStartAtEndRef.current = false;
+      const lastPage = count - 1;
+      setPageIndex(lastPage);
+      setScrollPct(100);
+      if (activeChapter) {
+        api
+          .saveReadingProgress(novelId, activeChapter.chapter_id, 1, 0, lastPage, count)
+          .catch(() => {});
+      }
+    } else {
+      setPageIndex((prev) => Math.min(prev, count - 1));
+    }
+  }, [
+    novelId,
+    activeChapter,
+    loading,
+    paginatedColWidth,
+    settings.reader_mode,
+    settings.reader_width,
+  ]);
+
+  useEffect(() => {
+    if (initialParagraphIndex !== null && initialParagraphIndex !== undefined) {
+      pendingJumpParagraphRef.current = {
+        chapterId: initialChapterId,
+        paragraphIndex: initialParagraphIndex,
+      };
+      if (restoredForChapterRef.current === initialChapterId) {
+        restoredForChapterRef.current = null;
+      }
+    }
+  }, [initialChapterId, initialParagraphIndex]);
+
   // Restore saved position when active chapter first renders
   useEffect(() => {
     if (loading || !activeChapter || !details) return;
     if (restoredForChapterRef.current === activeChapter.chapter_id) return;
     restoredForChapterRef.current = activeChapter.chapter_id;
 
-    // Jump to explicit paragraph if navigated from a Bookmark
-    if (initialParagraphIndex !== null && initialParagraphIndex !== undefined) {
-      setCurrentParagraphIdx(initialParagraphIndex);
-      setTimeout(() => {
-        const el = document.querySelector(
-          `[data-ch="${activeChapter.chapter_id}"][data-p="${initialParagraphIndex}"]`,
-        );
-        if (!el) return;
-        if (settings.reader_mode === "paginated") {
-          const vp = paginatedViewportRef.current;
-          const inner = paginatedContentRef.current;
-          if (vp && inner) {
-            vp.scrollLeft = 0;
-            const vpRect = vp.getBoundingClientRect();
-            const vpWidth = vpRect.width || vp.clientWidth;
-            const colW =
-              vpWidth > 0
-                ? Math.max(240, Math.min(settings.reader_width, vpWidth))
-                : settings.reader_width;
-            const stride = Math.max(1, colW + 64);
-            const innerRect = inner.getBoundingClientRect();
-            const elRect = el.getBoundingClientRect();
-            const offsetLeft = Math.max(0, elRect.left - innerRect.left);
-            const rawPage = Math.floor((offsetLeft + 8) / stride);
-            const totalW = inner.scrollWidth;
-            const computedCount =
-              totalW > 0
-                ? Math.max(1, Math.ceil((totalW - 8) / stride))
-                : Math.max(1, rawPage + 1);
-            const targetPage = Math.max(0, Math.min(computedCount - 1, rawPage));
-            setPageIndex(targetPage);
-            setScrollPct(
-              computedCount > 1
-                ? Math.round((targetPage / (computedCount - 1)) * 100)
-                : 0,
-            );
-          }
-        } else if (typeof el.scrollIntoView === "function") {
-          el.scrollIntoView({ behavior: "smooth", block: "center" });
-        }
-      }, 80);
+    // Jump to explicit paragraph if navigated from a Bookmark or Highlights drawer
+    const pendingPara =
+      pendingJumpParagraphRef.current &&
+      pendingJumpParagraphRef.current.chapterId === activeChapter.chapter_id
+        ? pendingJumpParagraphRef.current.paragraphIndex
+        : initialParagraphIndex;
+    if (pendingPara !== null && pendingPara !== undefined) {
+      if (settings.reader_mode === "paginated") {
+        pendingJumpParagraphRef.current = {
+          chapterId: activeChapter.chapter_id,
+          paragraphIndex: pendingPara,
+        };
+        setCurrentParagraphIdx(pendingPara);
+        return;
+      }
+      pendingJumpParagraphRef.current = null;
+      jumpToParagraphInScroll(activeChapter.chapter_id, pendingPara);
       return;
     }
 
@@ -699,7 +787,15 @@ export const ReaderPage: React.FC<ReaderPageProps> = ({
       setPageIndex(0);
       setScrollPct(0);
     }
-  }, [loading, activeChapter, details, initialParagraphIndex, settings.reader_mode, setInstantScrollTop]);
+  }, [
+    loading,
+    activeChapter,
+    details,
+    initialParagraphIndex,
+    settings.reader_mode,
+    setInstantScrollTop,
+    jumpToParagraphInScroll,
+  ]);
 
   const pendingScrollEndChapterRef = useRef<string | null>(null);
 
@@ -748,9 +844,47 @@ export const ReaderPage: React.FC<ReaderPageProps> = ({
   }, [novelId, activeChapter?.next_chapter_id]);
 
   const jumpToChapter = useCallback(
-    async (chapterId: string, startAtEnd = false) => {
+    async (chapterId: string, startAtEnd = false, targetParagraph: number | null = null) => {
       flushPendingProgress();
       flushSession(activeChapter);
+
+      // Fast path when target chapter is already rendered (avoids wiping scroll buffer/re-fetching)
+      const alreadyLoaded =
+        !errorMsg &&
+        !loading &&
+        !startAtEnd &&
+        (targetParagraph !== null && targetParagraph !== undefined
+          ? (activeChapter && activeChapter.chapter_id === chapterId) ||
+            (settings.reader_mode === "scroll" &&
+              chaptersQueue.some((c) => c.chapter_id === chapterId))
+          : activeChapter &&
+            activeChapter.chapter_id === chapterId &&
+            chaptersQueue[0]?.chapter_id === chapterId);
+      if (alreadyLoaded) {
+        restoredForChapterRef.current = chapterId;
+        pendingStartAtEndRef.current = false;
+        setActiveChapterId(chapterId);
+        setShowToc(false);
+        if (targetParagraph !== null && targetParagraph !== undefined) {
+          if (settings.reader_mode === "paginated") {
+            pendingJumpParagraphRef.current = { chapterId, paragraphIndex: targetParagraph };
+            recomputePages();
+          } else {
+            pendingJumpParagraphRef.current = null;
+            jumpToParagraphInScroll(chapterId, targetParagraph);
+          }
+        } else {
+          pendingJumpParagraphRef.current = null;
+          setPageIndex(0);
+          setScrollPct(0);
+          setCurrentParagraphIdx(0);
+          if (settings.reader_mode === "scroll" && scrollContainerRef.current) {
+            setInstantScrollTop(scrollContainerRef.current, 0);
+          }
+        }
+        return;
+      }
+
       const cached = prefetchedChaptersRef.current.get(chapterId);
       if (!cached) {
         setLoading(true);
@@ -762,6 +896,11 @@ export const ReaderPage: React.FC<ReaderPageProps> = ({
         // Prevent initial-load restore effect from resetting pageIndex/scroll position
         restoredForChapterRef.current = ch.chapter_id;
         pendingStartAtEndRef.current = startAtEnd;
+        const hasTargetPara = !startAtEnd && targetParagraph !== null && targetParagraph !== undefined;
+        pendingJumpParagraphRef.current =
+          hasTargetPara && settings.reader_mode === "paginated"
+            ? { chapterId: ch.chapter_id, paragraphIndex: targetParagraph }
+            : null;
 
         setChaptersQueue([ch]);
         setActiveChapterId(ch.chapter_id);
@@ -796,12 +935,16 @@ export const ReaderPage: React.FC<ReaderPageProps> = ({
             .catch(() => {});
         } else {
           pendingScrollEndChapterRef.current = null;
+          const nextPara = hasTargetPara ? targetParagraph : 0;
           setPageIndex(0);
           setScrollPct(0);
-          setCurrentParagraphIdx(0);
+          setCurrentParagraphIdx(nextPara);
           setLoading(false);
+          if (hasTargetPara && settings.reader_mode === "scroll") {
+            jumpToParagraphInScroll(ch.chapter_id, nextPara);
+          }
           await api
-            .saveReadingProgress(novelId, ch.chapter_id, 0, 0, 0, 1)
+            .saveReadingProgress(novelId, ch.chapter_id, 0, nextPara, 0, 1)
             .catch(() => {});
         }
       } catch (e) {
@@ -813,10 +956,15 @@ export const ReaderPage: React.FC<ReaderPageProps> = ({
     [
       novelId,
       activeChapter,
+      chaptersQueue,
+      errorMsg,
+      loading,
       settings.reader_mode,
       flushPendingProgress,
       flushSession,
       setInstantScrollTop,
+      jumpToParagraphInScroll,
+      recomputePages,
     ],
   );
 
@@ -913,51 +1061,6 @@ export const ReaderPage: React.FC<ReaderPageProps> = ({
     scheduleSaveProgress,
   ]);
 
-  // Paginated measurement
-  const recomputePages = useCallback(() => {
-    if (settings.reader_mode !== "paginated") return;
-    const vp = paginatedViewportRef.current;
-    const inner = paginatedContentRef.current;
-    if (!vp || !inner) return;
-    const gap = 64;
-    const rectW = vp.getBoundingClientRect().width;
-    const vpWidth =
-      rectW > 0
-        ? rectW
-        : vp.clientWidth > 0
-          ? vp.clientWidth
-          : Math.min(settings.reader_width, 960);
-    const colW = Math.max(240, Math.min(settings.reader_width, vpWidth));
-    if (Math.abs(colW - paginatedColWidth) > 0.25) {
-      setPaginatedColWidth(colW);
-      return;
-    }
-    const stride = colW + gap;
-    setPageStride(stride);
-    const totalW = inner.scrollWidth;
-    const count = Math.max(1, Math.ceil((totalW - 8) / stride));
-    setTotalPages(count);
-    if (pendingStartAtEndRef.current) {
-      pendingStartAtEndRef.current = false;
-      const lastPage = count - 1;
-      setPageIndex(lastPage);
-      setScrollPct(100);
-      if (activeChapter) {
-        api
-          .saveReadingProgress(novelId, activeChapter.chapter_id, 1, 0, lastPage, count)
-          .catch(() => {});
-      }
-    } else {
-      setPageIndex((prev) => Math.min(prev, count - 1));
-    }
-  }, [
-    novelId,
-    activeChapter,
-    paginatedColWidth,
-    settings.reader_mode,
-    settings.reader_width,
-  ]);
-
   useEffect(() => {
     if (settings.reader_mode !== "paginated" || loading) return;
     const t = setTimeout(recomputePages, 40);
@@ -1007,9 +1110,64 @@ export const ReaderPage: React.FC<ReaderPageProps> = ({
   );
 
   const handleToggleFullscreen = useCallback(async () => {
+    if (IS_IOS) {
+      setZenMode((prev) => {
+        const next = !prev;
+        setHudVisible(!next);
+        if (next) {
+          setShowToc(false);
+          setShowAppearance(false);
+        }
+        return next;
+      });
+      return;
+    }
     const next = await api.toggleFullscreen();
     setIsFullscreen(next);
   }, []);
+
+  const handleReadingSurfaceClick = useCallback(
+    (e: React.MouseEvent<HTMLElement>) => {
+      const target = e.target as HTMLElement | null;
+      if (target?.closest("button, a, input, select, textarea, label")) return;
+      if (typeof window !== "undefined" && window.getSelection()?.toString().trim()) return;
+      if (showToc || showAppearance) {
+        setShowToc(false);
+        setShowAppearance(false);
+        return;
+      }
+      if (zenMode) {
+        setZenMode(false);
+        setHudVisible(true);
+      } else {
+        setHudVisible((v) => !v);
+      }
+    },
+    [showToc, showAppearance, zenMode],
+  );
+
+  const handlePaginatedTouchStart = useCallback((e: React.TouchEvent<HTMLElement>) => {
+    const t = e.touches[0];
+    if (!t) return;
+    touchGestureRef.current = { x: t.clientX, y: t.clientY };
+  }, []);
+
+  const handlePaginatedTouchEnd = useCallback(
+    (e: React.TouchEvent<HTMLElement>) => {
+      const start = touchGestureRef.current;
+      touchGestureRef.current = null;
+      const t = e.changedTouches[0];
+      if (!start || !t) return;
+      if (start.x < 20) return; // keep edge free for system navigation gesture
+      if (typeof window !== "undefined" && window.getSelection()?.toString().trim()) return;
+      const dx = t.clientX - start.x;
+      const dy = t.clientY - start.y;
+      if (Math.abs(dx) > 45 && Math.abs(dx) > Math.abs(dy) * 1.4) {
+        goPage(dx < 0 ? 1 : -1);
+      }
+    },
+    [goPage],
+  );
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -1308,7 +1466,7 @@ export const ReaderPage: React.FC<ReaderPageProps> = ({
 
   return (
     <div
-      className="relative h-screen w-screen overflow-hidden flex flex-col select-text transition-colors duration-200"
+      className="relative h-[100dvh] w-screen overflow-hidden flex flex-col select-text transition-colors duration-200"
       style={{
         backgroundColor: themePalette.bg,
         color: themePalette.fg,
@@ -1328,8 +1486,10 @@ export const ReaderPage: React.FC<ReaderPageProps> = ({
 
       {/* Top HUD */}
       <header
-        data-tauri-drag-region="deep"
-        className={`macos-drag shrink-0 h-13 px-4 ${IS_MAC ? "pl-20" : ""} flex items-center justify-between border-b transition-all duration-200 z-30 ${
+        data-tauri-drag-region={!IS_IOS ? "deep" : undefined}
+        className={`${IS_MAC_DESKTOP ? "macos-drag pl-20" : ""} ${
+          IS_IOS ? "pt-[var(--safe-top)] min-h-[3.25rem]" : "h-13"
+        } shrink-0 px-3 sm:px-4 flex items-center justify-between border-b transition-all duration-200 z-30 ${
           hudVisible && !zenMode
             ? "opacity-100 translate-y-0"
             : "opacity-0 -translate-y-full pointer-events-none absolute inset-x-0 top-0"
@@ -1341,7 +1501,7 @@ export const ReaderPage: React.FC<ReaderPageProps> = ({
       >
         <div
           data-tauri-drag-region="false"
-          className="macos-no-drag flex items-center gap-3 min-w-0"
+          className="macos-no-drag flex items-center gap-2 sm:gap-3 min-w-0"
         >
           <button
             type="button"
@@ -1350,11 +1510,11 @@ export const ReaderPage: React.FC<ReaderPageProps> = ({
               if (isFullscreen) api.setFullscreen(false);
               onExit();
             }}
-            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium hover:bg-white/10 transition-colors"
+            className="inline-flex items-center gap-1.5 px-2.5 py-2 min-h-[40px] rounded-lg text-xs font-medium hover:bg-white/10 transition-colors shrink-0"
             style={{ color: themePalette.fg }}
           >
             <ArrowLeft className="w-4 h-4" />
-            Exit
+            <span className="hidden sm:inline">Exit</span>
           </button>
           <div className="h-4 w-px opacity-20 bg-current" />
           <div className="min-w-0">
@@ -1472,19 +1632,21 @@ export const ReaderPage: React.FC<ReaderPageProps> = ({
             <EyeOff className="w-4 h-4" />
           </button>
 
-          <button
-            type="button"
-            data-tauri-drag-region="false"
-            title="Toggle Fullscreen (F)"
-            onClick={handleToggleFullscreen}
-            className="p-2 rounded-lg hover:bg-white/10 transition-colors"
-          >
-            {isFullscreen ? (
-              <Minimize2 className="w-4 h-4" />
-            ) : (
-              <Maximize2 className="w-4 h-4" />
-            )}
-          </button>
+          {!IS_IOS && (
+            <button
+              type="button"
+              data-tauri-drag-region="false"
+              title="Toggle Fullscreen (F)"
+              onClick={handleToggleFullscreen}
+              className="p-2 rounded-lg hover:bg-white/10 transition-colors"
+            >
+              {isFullscreen ? (
+                <Minimize2 className="w-4 h-4" />
+              ) : (
+                <Maximize2 className="w-4 h-4" />
+              )}
+            </button>
+          )}
         </div>
       </header>
 
@@ -1496,9 +1658,9 @@ export const ReaderPage: React.FC<ReaderPageProps> = ({
             setZenMode(false);
             setHudVisible(true);
           }}
-          className="fixed top-3 right-4 z-40 px-2.5 py-1 rounded-full text-[11px] bg-black/40 text-white/75 hover:text-white backdrop-blur-md border border-white/10 transition-opacity opacity-30 hover:opacity-100"
+          className="fixed top-[calc(0.75rem+var(--safe-top))] right-4 z-40 px-3 py-1.5 rounded-full text-[11px] bg-black/45 text-white/80 hover:text-white backdrop-blur-md border border-white/10 transition-opacity opacity-50 sm:opacity-30 hover:opacity-100"
         >
-          Show Controls (H)
+          {IS_IOS ? "Show Controls" : "Show Controls (H)"}
         </button>
       )}
 
@@ -1533,8 +1695,13 @@ export const ReaderPage: React.FC<ReaderPageProps> = ({
         <div
           ref={scrollContainerRef}
           onScroll={handleScroll}
+          onClick={handleReadingSurfaceClick}
           onMouseUp={() => activeChapter && handleTextSelection(activeChapter.chapter_id)}
-          className="flex-1 overflow-y-auto px-6 sm:px-10 py-10"
+          onTouchEnd={() => {
+            if (!activeChapter) return;
+            window.setTimeout(() => handleTextSelection(activeChapter.chapter_id), 60);
+          }}
+          className="flex-1 overflow-y-auto overscroll-y-contain px-4 sm:px-8 md:px-10 pt-6 sm:pt-10 pb-[calc(2.5rem+var(--safe-bottom))]"
         >
           <div
             className="mx-auto space-y-16"
@@ -1657,7 +1824,15 @@ export const ReaderPage: React.FC<ReaderPageProps> = ({
       ) : (
         /* ---------------- PAGINATED MODE ---------------- */
         <div
-          className="flex-1 flex flex-col overflow-hidden px-6 py-6"
+          className="flex-1 flex flex-col overflow-hidden px-3 sm:px-6 pt-3 sm:pt-6 pb-[calc(0.75rem+var(--safe-bottom))]"
+          onClick={handleReadingSurfaceClick}
+          onTouchStart={handlePaginatedTouchStart}
+          onTouchEnd={(e) => {
+            handlePaginatedTouchEnd(e);
+            if (activeChapter) {
+              window.setTimeout(() => handleTextSelection(activeChapter.chapter_id), 60);
+            }
+          }}
           onMouseUp={() => activeChapter && handleTextSelection(activeChapter.chapter_id)}
         >
           <div
@@ -1741,18 +1916,18 @@ export const ReaderPage: React.FC<ReaderPageProps> = ({
               type="button"
               onClick={() => goPage(-1)}
               disabled={pageIndex === 0 && !activeChapter?.prev_chapter_id}
-              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg hover:bg-white/10 disabled:opacity-30"
+              className="inline-flex items-center gap-1 px-3 py-2 min-h-[40px] rounded-lg hover:bg-white/10 disabled:opacity-30"
             >
               <ChevronLeft className="w-4 h-4" /> Prev
             </button>
-            <span className="tabular-nums">
+            <span className="tabular-nums truncate px-2 text-center">
               Page {pageIndex + 1} of {totalPages} · {activeChapter?.title}
             </span>
             <button
               type="button"
               onClick={() => goPage(1)}
               disabled={pageIndex >= totalPages - 1 && !activeChapter?.next_chapter_id}
-              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg hover:bg-white/10 disabled:opacity-30"
+              className="inline-flex items-center gap-1 px-3 py-2 min-h-[40px] rounded-lg hover:bg-white/10 disabled:opacity-30"
             >
               Next <ChevronRight className="w-4 h-4" />
             </button>
@@ -1819,7 +1994,7 @@ export const ReaderPage: React.FC<ReaderPageProps> = ({
       {/* Table of Contents & Annotations Slide-Over Drawer */}
       {showToc && (
         <aside
-          className="fixed inset-y-0 right-0 w-80 sm:w-96 z-40 border-l shadow-2xl flex flex-col"
+          className="fixed inset-y-0 right-0 w-full max-w-full sm:w-96 z-40 border-l shadow-2xl flex flex-col pt-[var(--safe-top)] pb-[var(--safe-bottom)]"
           style={{
             backgroundColor: themePalette.bg,
             borderColor: themePalette.border,
@@ -1912,7 +2087,7 @@ export const ReaderPage: React.FC<ReaderPageProps> = ({
                         <div className="flex items-start justify-between gap-2">
                           <button
                             type="button"
-                            onClick={() => jumpToChapter(hl.chapter_id)}
+                            onClick={() => jumpToChapter(hl.chapter_id, false, hl.paragraph_index)}
                             className="text-left italic line-clamp-3 hover:underline"
                           >
                             “{hl.text}”
@@ -1944,7 +2119,10 @@ export const ReaderPage: React.FC<ReaderPageProps> = ({
                         <div className="flex items-center justify-between gap-2">
                           <button
                             type="button"
-                            onClick={() => bm.chapter_id && jumpToChapter(bm.chapter_id)}
+                            onClick={() =>
+                              bm.chapter_id &&
+                              jumpToChapter(bm.chapter_id, false, bm.paragraph_index ?? null)
+                            }
                             className="font-medium truncate hover:underline"
                           >
                             {bm.chapter_title || "Bookmark"}
@@ -1971,7 +2149,7 @@ export const ReaderPage: React.FC<ReaderPageProps> = ({
       {/* Typography & Appearance Drawer */}
       {showAppearance && (
         <aside
-          className="fixed top-14 right-4 w-80 sm:w-96 max-h-[82vh] overflow-y-auto z-40 rounded-2xl border shadow-2xl p-4 space-y-5"
+          className="fixed top-[calc(3.5rem+var(--safe-top))] right-2 left-2 sm:left-auto sm:right-4 sm:w-96 max-h-[78dvh] overflow-y-auto z-40 rounded-2xl border shadow-2xl p-4 space-y-5"
           style={{
             backgroundColor: themePalette.bg,
             borderColor: themePalette.border,
@@ -2029,7 +2207,7 @@ export const ReaderPage: React.FC<ReaderPageProps> = ({
           {/* Reading Themes */}
           <div className="space-y-1.5">
             <label className="text-[11px] uppercase tracking-wider opacity-60">Theme</label>
-            <div className="grid grid-cols-5 gap-1.5">
+            <div className="grid grid-cols-3 sm:grid-cols-6 gap-1.5">
               {Object.entries(READER_THEMES).map(([key, t]) => (
                 <button
                   key={key}
@@ -2097,6 +2275,36 @@ export const ReaderPage: React.FC<ReaderPageProps> = ({
               </label>
             </div>
           </div>
+
+          {details && details.translations.length > 1 && onSwitchNovel && (
+            <div className="space-y-1.5">
+              <label className="text-[11px] uppercase tracking-wider opacity-60">
+                Translation Language
+              </label>
+              <select
+                aria-label="Reader translation language menu"
+                value={novelId}
+                onChange={(e) => {
+                  const target = e.target.value;
+                  if (target && target !== novelId) {
+                    onSwitchNovel(target);
+                  }
+                }}
+                className="w-full px-2.5 py-2 rounded-lg border bg-transparent text-xs"
+                style={{ borderColor: themePalette.border }}
+              >
+                {details.translations.map((tr) => (
+                  <option
+                    key={tr.novel_id}
+                    value={tr.novel_id}
+                    className="bg-zinc-900 text-zinc-100"
+                  >
+                    {languageLabel(tr.language_code, tr.language_label)}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
 
           {/* Font Family */}
           <div className="space-y-1.5">

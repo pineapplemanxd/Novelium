@@ -56,7 +56,7 @@ export const ExplorePage: React.FC<ExplorePageProps> = ({
   }, [activeGenre]);
 
   return (
-    <div className="p-6 max-w-[1440px] mx-auto space-y-8">
+    <div className="p-4 sm:p-6 max-w-[1440px] mx-auto space-y-6 sm:space-y-8">
       <div>
         <h1 className="text-2xl font-semibold tracking-tight flex items-center gap-2">
           <Compass className="w-6 h-6 text-[var(--accent-hover)]" />

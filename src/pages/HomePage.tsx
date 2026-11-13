@@ -45,15 +45,15 @@ export const HomePage: React.FC<HomePageProps> = ({
   const [loadingFeeds, setLoadingFeeds] = useState(false);
   const [feedError, setFeedError] = useState<string | null>(null);
 
-  const loadDashboard = async () => {
+  const loadDashboard = async (): Promise<{ ok: boolean; data: HomeDashboardData | null }> => {
     setLoadingDash(true);
     try {
       const data = await api.getHomeDashboard();
       setDashboard(data);
-      return data;
+      return { ok: true, data };
     } catch (e) {
       setFeedError(extractErrorMessage(e));
-      return null;
+      return { ok: false, data: null };
     } finally {
       setLoadingDash(false);
     }
@@ -129,7 +129,9 @@ export const HomePage: React.FC<HomePageProps> = ({
   };
 
   useEffect(() => {
-    loadDashboard().then((dash) => loadOnlineFeeds(dash, false));
+    loadDashboard().then((res) => {
+      if (res.ok) loadOnlineFeeds(res.data, false);
+    });
   }, []);
 
   const stats = dashboard?.stats;
@@ -139,7 +141,7 @@ export const HomePage: React.FC<HomePageProps> = ({
   );
 
   return (
-    <div className="p-6 max-w-[1440px] mx-auto space-y-8">
+    <div className="p-4 sm:p-6 max-w-[1440px] mx-auto space-y-8">
       {/* Header + Stats Strip */}
       <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
         <div>
@@ -195,7 +197,11 @@ export const HomePage: React.FC<HomePageProps> = ({
 
           <button
             type="button"
-            onClick={() => loadDashboard().then((d) => loadOnlineFeeds(d, true))}
+            onClick={() =>
+              loadDashboard().then((res) => {
+                if (res.ok) loadOnlineFeeds(res.data, true);
+              })
+            }
             disabled={loadingFeeds}
             className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium border border-[var(--border-subtle)] bg-[var(--bg-surface)] hover:bg-[var(--bg-elevated)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
           >

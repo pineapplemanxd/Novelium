@@ -7,6 +7,7 @@ pub mod models;
 pub mod net;
 pub mod sources;
 pub mod state;
+pub mod sync;
 
 use std::sync::Arc;
 use tauri::Manager;
@@ -17,6 +18,7 @@ use crate::downloads::DownloadManager;
 use crate::net::SourceHttpClient;
 use crate::sources::SourceRegistry;
 use crate::state::AppState;
+use crate::sync::GoogleDriveSyncCoordinator;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -34,12 +36,19 @@ pub fn run() {
             let app_data_dir = app
                 .path()
                 .app_data_dir()
-                .expect("failed to resolve macOS app data directory");
+                .expect("failed to resolve app data directory");
             std::fs::create_dir_all(&app_data_dir)?;
 
             let db_path = app_data_dir.join("novelium.db");
             let default_download_dir = app_data_dir.join("library");
             let custom_sources_dir = app_data_dir.join("sources");
+            #[cfg(target_os = "ios")]
+            let cache_dir = app
+                .path()
+                .app_cache_dir()
+                .unwrap_or_else(|_| app_data_dir.join("cache"))
+                .join("parsed_books");
+            #[cfg(not(target_os = "ios"))]
             let cache_dir = app_data_dir.join("cache").join("parsed_books");
             std::fs::create_dir_all(&default_download_dir)?;
             std::fs::create_dir_all(&custom_sources_dir)?;
@@ -71,6 +80,7 @@ pub fn run() {
                 sources,
                 downloads,
                 http,
+                gdrive: GoogleDriveSyncCoordinator::new(),
                 app_data_dir,
                 default_download_dir,
                 logs: Arc::new(Mutex::new(vec![
@@ -128,6 +138,7 @@ pub fn run() {
             commands::downloads::resume_download,
             commands::downloads::cancel_download,
             commands::downloads::retry_download,
+            commands::downloads::pause_active_downloads,
             commands::downloads::delete_downloaded_chapters,
             commands::downloads::delete_downloaded_novel,
             commands::downloads::get_storage_stats,
@@ -142,6 +153,15 @@ pub fn run() {
             commands::settings::reset_settings,
             commands::settings::get_diagnostics,
             commands::settings::read_local_image_data_url,
+            // Google Drive Cloud Sync
+            commands::sync::get_gdrive_sync_status,
+            commands::sync::save_gdrive_sync_config,
+            commands::sync::start_gdrive_oauth,
+            commands::sync::complete_gdrive_oauth_manual,
+            commands::sync::cancel_gdrive_oauth,
+            commands::sync::disconnect_gdrive,
+            commands::sync::verify_gdrive_folder,
+            commands::sync::sync_with_gdrive,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Novelium Tauri application");

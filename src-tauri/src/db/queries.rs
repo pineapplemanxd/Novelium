@@ -7,10 +7,20 @@ use crate::db::Database;
 use crate::error::{AppError, AppResult};
 use crate::models::{
     AppSettings, Bookmark, Chapter, Collection, DailyReadingPoint, DownloadStatus, DownloadTask,
-    Highlight, HomeDashboardData, LibraryEntry, LibraryExportBundle, LibraryNovelItem,
-    LibraryStatus, NovelRecord, NovelStatus, NovelStorageUsage, NovelSummary, NovelTranslation,
-    ReadingHistoryItem, ReadingProgress, ReadingStats,
+    GoogleDriveSyncConfig, Highlight, HomeDashboardData, LibraryEntry, LibraryExportBundle,
+    LibraryNovelItem, LibraryStatus, NovelRecord, NovelStatus, NovelStorageUsage, NovelSummary,
+    NovelTranslation, ReadingHistoryItem, ReadingProgress, ReadingStats,
 };
+
+fn is_newer_or_equal_iso(incoming: &str, existing: &str) -> bool {
+    match (
+        chrono::DateTime::parse_from_rfc3339(incoming),
+        chrono::DateTime::parse_from_rfc3339(existing),
+    ) {
+        (Ok(a), Ok(b)) => a >= b,
+        _ => incoming >= existing,
+    }
+}
 
 fn now_iso() -> String {
     Utc::now().to_rfc3339()
@@ -1587,7 +1597,7 @@ impl Database {
             match stored {
                 Some(json_str) => match serde_json::from_str::<AppSettings>(&json_str) {
                     Ok(mut s) => {
-                        if s.download_dir.trim().is_empty() {
+                        if cfg!(target_os = "ios") || s.download_dir.trim().is_empty() {
                             s.download_dir = default_download_dir.to_string();
                         }
                         Ok(s)
@@ -1599,9 +1609,8 @@ impl Database {
         })
     }
 
-    pub fn save_settings(&self, settings: &AppSettings) -> AppResult<()> {
+    pub fn save_settings_with_timestamp(&self, settings: &AppSettings, updated_at: &str) -> AppResult<()> {
         let json_str = serde_json::to_string(settings)?;
-        let now = now_iso();
         self.with_conn(|conn| {
             conn.execute(
                 r#"
@@ -1609,9 +1618,56 @@ impl Database {
                 VALUES ('app_settings', ?1, ?2)
                 ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at
                 "#,
+                params![json_str, updated_at],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn save_settings(&self, settings: &AppSettings) -> AppResult<()> {
+        self.save_settings_with_timestamp(settings, &now_iso())
+    }
+
+    pub fn load_gdrive_config(&self) -> AppResult<GoogleDriveSyncConfig> {
+        self.with_conn(|conn| {
+            let stored: Option<String> = conn
+                .query_row(
+                    "SELECT value_json FROM settings WHERE key = 'gdrive_sync_config'",
+                    [],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            match stored {
+                Some(json_str) => Ok(serde_json::from_str::<GoogleDriveSyncConfig>(&json_str)
+                    .unwrap_or_default()),
+                None => Ok(GoogleDriveSyncConfig::default()),
+            }
+        })
+    }
+
+    pub fn save_gdrive_config(&self, cfg: &GoogleDriveSyncConfig) -> AppResult<()> {
+        let json_str = serde_json::to_string(cfg)?;
+        let now = now_iso();
+        self.with_conn(|conn| {
+            conn.execute(
+                r#"
+                INSERT INTO settings (key, value_json, updated_at)
+                VALUES ('gdrive_sync_config', ?1, ?2)
+                ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at
+                "#,
                 params![json_str, now],
             )?;
             Ok(())
+        })
+    }
+
+    pub fn list_all_novels(&self) -> AppResult<Vec<NovelRecord>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare("SELECT * FROM novels ORDER BY updated_at DESC")?;
+            let rows = stmt
+                .query_map([], row_to_novel)?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
         })
     }
 
@@ -1675,6 +1731,14 @@ impl Database {
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
 
+            let settings_updated_at: Option<String> = conn
+                .query_row(
+                    "SELECT updated_at FROM settings WHERE key = 'app_settings'",
+                    [],
+                    |r| r.get(0),
+                )
+                .optional()?;
+
             Ok(LibraryExportBundle {
                 version: 1,
                 exported_at: now_iso(),
@@ -1688,11 +1752,32 @@ impl Database {
                 collection_items,
                 reading_history,
                 settings: Some(settings),
+                settings_updated_at,
             })
         })
     }
 
     pub fn import_bundle(&self, bundle: &LibraryExportBundle) -> AppResult<(usize, usize)> {
+        let (novels_count, entries_count, _) = self.merge_bundle_with_mode(bundle, false, true)?;
+        Ok((novels_count, entries_count))
+    }
+
+    /// Two-way cloud sync merge: preserves newer reading progress and library entry
+    /// timestamps on either device and never clobbers already-downloaded local chapters.
+    pub fn merge_bundle(
+        &self,
+        bundle: &LibraryExportBundle,
+        apply_settings: bool,
+    ) -> AppResult<(usize, usize, bool)> {
+        self.merge_bundle_with_mode(bundle, true, apply_settings)
+    }
+
+    fn merge_bundle_with_mode(
+        &self,
+        bundle: &LibraryExportBundle,
+        merge_newer_only: bool,
+        apply_settings: bool,
+    ) -> AppResult<(usize, usize, bool)> {
         let mut novels_count = 0usize;
         for novel in &bundle.novels {
             let mut sanitized = novel.clone();
@@ -1768,6 +1853,20 @@ impl Database {
                 if !novel_exists(&tx, &entry.novel_id)? {
                     continue;
                 }
+                if merge_newer_only {
+                    let existing_updated: Option<String> = tx
+                        .query_row(
+                            "SELECT updated_at FROM library_entries WHERE novel_id = ?1",
+                            params![entry.novel_id],
+                            |r| r.get(0),
+                        )
+                        .optional()?;
+                    if let Some(ref ts) = existing_updated {
+                        if !is_newer_or_equal_iso(&entry.updated_at, ts) {
+                            continue;
+                        }
+                    }
+                }
                 tx.execute(
                     r#"
                     INSERT INTO library_entries (novel_id, status, is_bookmarked, follow_updates, last_checked_chapters, added_at, updated_at)
@@ -1794,6 +1893,20 @@ impl Database {
             for rp in &bundle.reading_progress {
                 if !novel_exists(&tx, &rp.novel_id)? || !chapter_exists(&tx, &rp.chapter_id)? {
                     continue;
+                }
+                if merge_newer_only {
+                    let existing_updated: Option<String> = tx
+                        .query_row(
+                            "SELECT updated_at FROM reading_progress WHERE novel_id = ?1",
+                            params![rp.novel_id],
+                            |r| r.get(0),
+                        )
+                        .optional()?;
+                    if let Some(ref ts) = existing_updated {
+                        if !is_newer_or_equal_iso(&rp.updated_at, ts) {
+                            continue;
+                        }
+                    }
                 }
                 tx.execute(
                     r#"
@@ -1882,11 +1995,55 @@ impl Database {
             Ok(())
         })?;
 
-        if let Some(settings) = &bundle.settings {
-            self.save_settings(settings)?;
+        let mut settings_applied = false;
+        if apply_settings {
+            if let Some(settings) = &bundle.settings {
+                let (existing_dir, existing_updated) = self.with_conn(|conn| {
+                    let row: Option<(String, String)> = conn
+                        .query_row(
+                            "SELECT value_json, updated_at FROM settings WHERE key = 'app_settings'",
+                            [],
+                            |r| Ok((r.get(0)?, r.get(1)?)),
+                        )
+                        .optional()?;
+                    Ok(match row {
+                        Some((json_s, ts)) => (
+                            serde_json::from_str::<AppSettings>(&json_s)
+                                .ok()
+                                .map(|cfg| cfg.download_dir),
+                            Some(ts),
+                        ),
+                        None => (None, None),
+                    })
+                })?;
+
+                let incoming_ts = bundle
+                    .settings_updated_at
+                    .as_deref()
+                    .unwrap_or(&bundle.exported_at);
+                let should_apply = !merge_newer_only
+                    || existing_updated
+                        .as_deref()
+                        .map(|ts| is_newer_or_equal_iso(incoming_ts, ts))
+                        .unwrap_or(true);
+
+                if should_apply {
+                    let mut restored = settings.clone();
+                    // Keep target profile's download directory instead of overwriting with exported profile's path
+                    restored.download_dir = existing_dir
+                        .filter(|d| !d.trim().is_empty())
+                        .unwrap_or_default();
+                    if let Some(ref ts) = bundle.settings_updated_at {
+                        self.save_settings_with_timestamp(&restored, ts)?;
+                    } else {
+                        self.save_settings(&restored)?;
+                    }
+                    settings_applied = true;
+                }
+            }
         }
 
-        Ok((novels_count, entries_count))
+        Ok((novels_count, entries_count, settings_applied))
     }
 }
 
@@ -2033,6 +2190,119 @@ mod tests {
         assert!((items[0].progress.as_ref().unwrap().scroll_offset - 0.4).abs() < 1e-6);
         assert_eq!(db2.list_bookmarks(Some(&novel.id)).unwrap()[0].color, "#F59E0B");
         assert_eq!(db2.list_highlights(&novel.id, Some("gut:99:1")).unwrap()[0].color, "#6EE7B7");
+    }
+
+    #[test]
+    fn test_import_bundle_preserves_target_download_dir() {
+        let db1 = Database::open_in_memory().unwrap();
+        let mut s1 = AppSettings::default_with_dir("/profile-a/downloads".to_string());
+        s1.reader_theme = "sepia".to_string();
+        db1.save_settings(&s1).unwrap();
+        let bundle = db1.export_bundle("/profile-a/downloads").unwrap();
+
+        // Target profile with an existing download_dir keeps its own path while restoring settings
+        let db_existing = Database::open_in_memory().unwrap();
+        let s2 = AppSettings::default_with_dir("/profile-b/downloads".to_string());
+        db_existing.save_settings(&s2).unwrap();
+        db_existing.import_bundle(&bundle).unwrap();
+        let loaded_existing = db_existing.load_settings("/fallback/downloads").unwrap();
+        assert_eq!(loaded_existing.reader_theme, "sepia");
+        assert_eq!(loaded_existing.download_dir, "/profile-b/downloads");
+
+        // Fresh profile falls back to its own platform default directory
+        let db_fresh = Database::open_in_memory().unwrap();
+        db_fresh.import_bundle(&bundle).unwrap();
+        let loaded_fresh = db_fresh.load_settings("/profile-c/default-downloads").unwrap();
+        assert_eq!(loaded_fresh.reader_theme, "sepia");
+        assert_eq!(loaded_fresh.download_dir, "/profile-c/default-downloads");
+    }
+
+    #[test]
+    fn test_merge_bundle_keeps_newer_progress_and_gdrive_config_isolated() {
+        let db = Database::open_in_memory().unwrap();
+        let novel = db.upsert_novel(&sample_novel("gut:50")).unwrap();
+        db.upsert_chapters(
+            &novel.id,
+            &[
+                Chapter {
+                    id: "gut:50:1".into(),
+                    novel_id: novel.id.clone(),
+                    external_id: "1".into(),
+                    chapter_number: 1.0,
+                    volume: None,
+                    title: "Ch 1".into(),
+                    url: None,
+                    word_count: 100,
+                    published_at: None,
+                    is_downloaded: false,
+                    local_path: None,
+                    size_bytes: 0,
+                },
+                Chapter {
+                    id: "gut:50:2".into(),
+                    novel_id: novel.id.clone(),
+                    external_id: "2".into(),
+                    chapter_number: 2.0,
+                    volume: None,
+                    title: "Ch 2".into(),
+                    url: None,
+                    word_count: 100,
+                    published_at: None,
+                    is_downloaded: false,
+                    local_path: None,
+                    size_bytes: 0,
+                },
+            ],
+        )
+        .unwrap();
+
+        // Save newer local progress on Chapter 2
+        db.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO reading_progress (novel_id, chapter_id, chapter_number, scroll_offset, paragraph_index, page_index, total_pages, progress_percent, updated_at) VALUES (?1, ?2, 2.0, 0.5, 4, 2, 5, 50.0, '2026-11-13T18:00:00Z')",
+                params![novel.id, "gut:50:2"],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        // Incoming stale remote progress from an older device must NOT regress Chapter 2 -> Chapter 1
+        let mut stale_bundle = db.export_bundle("/tmp/dl").unwrap();
+        stale_bundle.reading_progress = vec![ReadingProgress {
+            novel_id: novel.id.clone(),
+            chapter_id: "gut:50:1".into(),
+            chapter_number: 1.0,
+            chapter_title: Some("Ch 1".into()),
+            scroll_offset: 0.1,
+            paragraph_index: 1,
+            page_index: 0,
+            total_pages: 1,
+            progress_percent: 10.0,
+            updated_at: "2026-11-12T10:00:00Z".into(),
+        }];
+        db.merge_bundle(&stale_bundle, false).unwrap();
+        assert_eq!(db.get_reading_progress(&novel.id).unwrap().unwrap().chapter_id, "gut:50:2");
+
+        // Incoming newer progress MUST advance it
+        let mut newer_bundle = stale_bundle;
+        newer_bundle.reading_progress[0].updated_at = "2026-11-14T09:00:00Z".into();
+        db.merge_bundle(&newer_bundle, false).unwrap();
+        assert_eq!(db.get_reading_progress(&novel.id).unwrap().unwrap().chapter_id, "gut:50:1");
+
+        // OAuth tokens/config are stored locally and never included in export_bundle JSON
+        let cfg = GoogleDriveSyncConfig {
+            enabled: true,
+            client_id: "client-id.apps.googleusercontent.com".into(),
+            client_secret: "super-secret".into(),
+            folder_input: "https://drive.google.com/drive/folders/1JoF3DeGpjMRY__lN-nY-OITpT6Dma2Yd?hl=pl".into(),
+            folder_id: "1JoF3DeGpjMRY__lN-nY-OITpT6Dma2Yd".into(),
+            refresh_token: Some("refresh-tok".into()),
+            ..Default::default()
+        };
+        db.save_gdrive_config(&cfg).unwrap();
+        let loaded_cfg = db.load_gdrive_config().unwrap();
+        assert_eq!(loaded_cfg.folder_id, "1JoF3DeGpjMRY__lN-nY-OITpT6Dma2Yd");
+        assert_eq!(loaded_cfg.refresh_token.as_deref(), Some("refresh-tok"));
     }
 
     #[test]
@@ -2210,6 +2480,7 @@ mod tests {
             collection_items: vec![],
             reading_history: vec![],
             settings: None,
+            settings_updated_at: None,
         };
 
         let (novels_cnt, entries_cnt) = db.import_bundle(&bundle).unwrap();

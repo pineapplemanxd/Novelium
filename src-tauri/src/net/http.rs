@@ -199,7 +199,7 @@ impl SourceHttpClient {
             client,
             robots_cache: Arc::new(Mutex::new(HashMap::new())),
             domain_timers: Arc::new(Mutex::new(HashMap::new())),
-            enforce_robots: true,
+            enforce_robots: false,
         })
     }
 
@@ -447,10 +447,13 @@ Disallow: /restricted
             }
         });
 
-        let http = SourceHttpClient::new().unwrap();
-        let res = http.probe_latency(&format!("{base}/blocked/api")).await;
+        let http_default = SourceHttpClient::new().unwrap();
+        assert!(http_default.probe_latency(&format!("{base}/blocked/api")).await.is_ok());
+
+        let http_strict = SourceHttpClient::new().unwrap().with_robots_enforcement(true);
+        let res = http_strict.probe_latency(&format!("{base}/blocked/api")).await;
         assert!(matches!(res, Err(AppError::RobotsDisallowed(_))));
-        assert!(http.probe_latency(&format!("{base}/ok")).await.is_ok());
+        assert!(http_strict.probe_latency(&format!("{base}/ok")).await.is_ok());
 
         srv.abort();
     }

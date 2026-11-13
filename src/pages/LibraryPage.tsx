@@ -17,6 +17,7 @@ import { CoverImage } from "../components/CoverImage";
 import { LibraryNovelCard } from "../components/NovelCard";
 import type { Collection, LibraryNovelItem, UpdateCheckResult } from "../types/novel";
 import { APP_LANGUAGES, formatBytes, formatRelativeDate, languageLabel, libraryStatusLabel } from "../utils/format";
+import { importBookFilesFromPicker } from "../utils/importBooks";
 
 interface LibraryPageProps {
   onOpenNovel: (novelId: string) => void;
@@ -129,24 +130,8 @@ export const LibraryPage: React.FC<LibraryPageProps> = ({
     return list;
   }, [items, shelf, selectedCollection, languageFilter, search, sortBy]);
 
-  const handleImportFiles = async () => {
-    try {
-      const files = await api.pickBookFiles();
-      if (files.length === 0) return;
-      setImporting(true);
-      let importedCount = 0;
-      for (const f of files) {
-        await api.importLocalBook(f);
-        importedCount++;
-      }
-      onNotify(`Imported ${importedCount} book${importedCount === 1 ? "" : "s"} into your library`);
-      await loadData();
-    } catch (e) {
-      onNotify(extractErrorMessage(e), true);
-    } finally {
-      setImporting(false);
-    }
-  };
+  const handleImportFiles = () =>
+    importBookFilesFromPicker(onNotify, loadData, setImporting, "your library");
 
   const handleCreateCollection = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -194,7 +179,7 @@ export const LibraryPage: React.FC<LibraryPageProps> = ({
   };
 
   return (
-    <div className="p-6 max-w-[1440px] mx-auto space-y-5">
+    <div className="p-4 sm:p-6 max-w-[1440px] mx-auto space-y-5">
       {/* Header */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
@@ -223,7 +208,7 @@ export const LibraryPage: React.FC<LibraryPageProps> = ({
             style={{ backgroundColor: "var(--accent)" }}
           >
             <Upload className="w-3.5 h-3.5" />
-            {importing ? "Importing..." : "Import EPUB / TXT / HTML"}
+            {importing ? "Importing..." : "Import EPUB / PDF / TXT"}
           </button>
         </div>
       </div>
@@ -265,13 +250,13 @@ export const LibraryPage: React.FC<LibraryPageProps> = ({
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          <div className="relative">
+          <div className="relative flex-1 sm:flex-initial">
             <Search className="w-3.5 h-3.5 text-[var(--text-muted)] absolute left-2.5 top-1/2 -translate-y-1/2" />
             <input
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder="Filter library..."
-              className="pl-8 pr-3 py-1.5 w-48 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-xs focus:outline-none focus:border-[var(--accent)]"
+              className="pl-8 pr-3 py-1.5 w-full sm:w-48 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-xs focus:outline-none focus:border-[var(--accent)]"
             />
           </div>
 
@@ -412,7 +397,7 @@ export const LibraryPage: React.FC<LibraryPageProps> = ({
         <div className="py-16 text-center rounded-xl border border-dashed border-[var(--border-strong)] bg-[var(--bg-surface)]/40 space-y-2">
           <p className="text-sm font-medium">No novels in this shelf</p>
           <p className="text-xs text-[var(--text-secondary)]">
-            Add novels from Discover or import local EPUB, TXT, or HTML books.
+            Add novels from Discover or import local EPUB, PDF, FB2, MD, TXT, or HTML books.
           </p>
           <button
             type="button"

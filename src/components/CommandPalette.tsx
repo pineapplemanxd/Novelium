@@ -69,7 +69,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center pt-[12vh] bg-black/60 backdrop-blur-sm px-4"
+      className="fixed inset-0 z-50 flex items-start justify-center pt-[calc(2rem+var(--safe-top))] sm:pt-[12vh] bg-black/60 backdrop-blur-sm px-3 sm:px-4"
       onClick={onClose}
     >
       <div

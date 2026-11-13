@@ -60,9 +60,13 @@ pub async fn get_diagnostics(state: State<'_, AppState>) -> AppResult<Diagnostic
 
 /// Fallback helper to load local cover files cleanly as data URLs if needed
 #[tauri::command]
-pub async fn read_local_image_data_url(path: String) -> AppResult<String> {
-    let bytes = std::fs::read(&path)?;
-    let lower = path.to_ascii_lowercase();
+pub async fn read_local_image_data_url(
+    state: State<'_, AppState>,
+    path: String,
+) -> AppResult<String> {
+    let resolved = state.downloads.resolve_stored_path(&path);
+    let bytes = std::fs::read(&resolved)?;
+    let lower = resolved.to_string_lossy().to_ascii_lowercase();
     let mime = if lower.ends_with(".png") {
         "image/png"
     } else if lower.ends_with(".webp") {
