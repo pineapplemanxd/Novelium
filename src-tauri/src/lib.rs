@@ -162,6 +162,8 @@ pub fn run() {
             commands::sync::disconnect_gdrive,
             commands::sync::verify_gdrive_folder,
             commands::sync::sync_with_gdrive,
+            commands::sync::list_gdrive_cloud_books,
+            commands::sync::download_gdrive_book_to_device,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Novelium Tauri application");

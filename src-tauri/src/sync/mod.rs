@@ -13,9 +13,9 @@ use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 use crate::db::Database;
-use crate::downloads::DownloadManager;
+use crate::downloads::{DownloadManager, StoredChapterPayload};
 use crate::error::{AppError, AppResult};
-use crate::models::{Chapter, GoogleDriveSyncConfig, GoogleDriveSyncStatus, NovelRecord};
+use crate::models::{Chapter, GoogleDriveSyncConfig, GoogleDriveSyncStatus, NovelRecord, NovelStatus};
 
 const MAX_ARCHIVE_ENTRY_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -25,12 +25,16 @@ pub struct BookArchiveChapterEntry {
     pub filename: String,
     pub size_bytes: u64,
     pub sha256: String,
+    #[serde(default)]
+    pub chapter: Option<Chapter>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BookArchiveManifest {
     pub version: u32,
     pub novel_id: String,
+    #[serde(default)]
+    pub novel: Option<NovelRecord>,
     pub cover_filename: Option<String>,
     pub cover_sha256: Option<String>,
     pub chapters: Vec<BookArchiveChapterEntry>,
@@ -38,6 +42,7 @@ pub struct BookArchiveManifest {
 
 #[derive(Debug, Clone, Default)]
 pub struct UnpackBookResult {
+    pub novel_id: String,
     pub chapters_restored: usize,
     pub cover_restored: bool,
 }
@@ -283,7 +288,7 @@ fn collect_novel_archive_inputs(
         });
     }
 
-    if prep_chapters.is_empty() && cover.is_none() {
+    if prep_chapters.is_empty() && !novel.is_local {
         return None;
     }
 
@@ -340,9 +345,15 @@ pub fn pack_novel_archive(
         return Ok(None);
     };
 
+    let chapter_map: HashMap<String, Chapter> = chapters
+        .iter()
+        .map(|ch| (ch.id.clone(), ch.clone()))
+        .collect();
+
     let manifest = BookArchiveManifest {
         version: 1,
         novel_id: novel.id.clone(),
+        novel: Some(novel.clone()),
         cover_filename: prepared.cover.as_ref().map(|c| c.filename.clone()),
         cover_sha256: prepared.cover.as_ref().map(|c| c.sha256.clone()),
         chapters: prepared
@@ -353,6 +364,7 @@ pub fn pack_novel_archive(
                 filename: c.filename.clone(),
                 size_bytes: c.size_bytes,
                 sha256: c.sha256.clone(),
+                chapter: chapter_map.get(&c.chapter_id).cloned(),
             })
             .collect(),
     };
@@ -415,6 +427,16 @@ pub fn unpack_novel_archive(
     db: &Database,
     download_dir: &Path,
 ) -> AppResult<UnpackBookResult> {
+    unpack_novel_archive_with_hints(zip_bytes, db, download_dir, None, None)
+}
+
+pub fn unpack_novel_archive_with_hints(
+    zip_bytes: &[u8],
+    db: &Database,
+    download_dir: &Path,
+    title_hint: Option<&str>,
+    author_hint: Option<&str>,
+) -> AppResult<UnpackBookResult> {
     let cursor = Cursor::new(zip_bytes);
     let mut archive = ZipArchive::new(cursor)
         .map_err(|e| AppError::InvalidInput(format!("Corrupted book archive: {e}")))?;
@@ -423,11 +445,56 @@ pub fn unpack_novel_archive(
     let manifest: BookArchiveManifest = serde_json::from_slice(&manifest_bytes)?;
     let novel_id = manifest.novel_id.clone();
 
-    let Some(novel) = db.get_novel(&novel_id)? else {
-        return Ok(UnpackBookResult::default());
+    let novel = match db.get_novel(&novel_id)? {
+        Some(existing) => existing,
+        None => {
+            if let Some(ref embedded) = manifest.novel {
+                db.upsert_novel(embedded)?
+            } else if !manifest.chapters.is_empty() || title_hint.is_some() {
+                let (source_id, external_id) = novel_id
+                    .split_once(':')
+                    .map(|(s, e)| (s.to_string(), e.to_string()))
+                    .unwrap_or_else(|| ("local".to_string(), novel_id.clone()));
+                let now = chrono::Utc::now().to_rfc3339();
+                let fallback = NovelRecord {
+                    id: novel_id.clone(),
+                    source_id: source_id.clone(),
+                    external_id,
+                    title: title_hint
+                        .filter(|s| !s.trim().is_empty())
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| novel_id.clone()),
+                    author_id: None,
+                    author: author_hint
+                        .filter(|s| !s.trim().is_empty())
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| "Unknown Author".to_string()),
+                    description: "Synced from Google Drive".to_string(),
+                    cover_url: None,
+                    local_cover_path: None,
+                    status: NovelStatus::Unknown,
+                    genres: Vec::new(),
+                    tags: Vec::new(),
+                    rating: None,
+                    popularity: 0,
+                    chapter_count: manifest.chapters.len() as i64,
+                    last_updated_remote: None,
+                    metadata: serde_json::json!({}),
+                    is_local: source_id == "local",
+                    created_at: now.clone(),
+                    updated_at: now,
+                };
+                db.upsert_novel(&fallback)?
+            } else {
+                return Ok(UnpackBookResult::default());
+            }
+        }
     };
 
-    let mut res = UnpackBookResult::default();
+    let mut res = UnpackBookResult {
+        novel_id: novel_id.clone(),
+        ..Default::default()
+    };
     let safe_novel_id = DownloadManager::safe_id(&novel_id);
 
     if let Some(ref raw_cover) = manifest.cover_filename {
@@ -447,7 +514,7 @@ pub fn unpack_novel_archive(
         }
     }
 
-    let existing_chapters: HashMap<String, Chapter> = db
+    let mut existing_chapters: HashMap<String, Chapter> = db
         .get_chapters(&novel_id)?
         .into_iter()
         .map(|c| (c.id.clone(), c))
@@ -461,7 +528,7 @@ pub fn unpack_novel_archive(
         std::fs::create_dir_all(&chapters_dir)?;
     }
 
-    for entry in &manifest.chapters {
+    for (idx, entry) in manifest.chapters.iter().enumerate() {
         let safe_file = sanitize_archive_basename(&entry.filename)?;
         let dest = chapters_dir.join(&safe_file);
 
@@ -482,6 +549,44 @@ pub fn unpack_novel_archive(
         }
 
         let bytes = read_zip_entry_capped(&mut archive, &format!("chapters/{safe_file}"))?;
+        let payload = serde_json::from_slice::<StoredChapterPayload>(&bytes).ok();
+        let word_count = payload.as_ref().map(|p| p.word_count).unwrap_or(0);
+
+        if !existing_chapters.contains_key(&entry.chapter_id) {
+            let ch_row = if let Some(ref ch_meta) = entry.chapter {
+                ch_meta.clone()
+            } else {
+                let ext_id = entry
+                    .chapter_id
+                    .rsplit_once(':')
+                    .map(|(_, e)| e.to_string())
+                    .unwrap_or_else(|| (idx + 1).to_string());
+                Chapter {
+                    id: entry.chapter_id.clone(),
+                    novel_id: novel_id.clone(),
+                    external_id: ext_id,
+                    chapter_number: payload
+                        .as_ref()
+                        .map(|p| p.chapter_number)
+                        .unwrap_or((idx + 1) as f64),
+                    volume: None,
+                    title: payload
+                        .as_ref()
+                        .map(|p| p.title.clone())
+                        .filter(|t| !t.trim().is_empty())
+                        .unwrap_or_else(|| format!("Chapter {}", idx + 1)),
+                    url: None,
+                    word_count,
+                    published_at: None,
+                    is_downloaded: false,
+                    local_path: None,
+                    size_bytes: 0,
+                }
+            };
+            db.upsert_chapters(&novel_id, &[ch_row.clone()])?;
+            existing_chapters.insert(entry.chapter_id.clone(), ch_row);
+        }
+
         let tmp_dest = chapters_dir.join(format!(".{safe_file}.tmp"));
         std::fs::write(&tmp_dest, &bytes)?;
         std::fs::rename(&tmp_dest, &dest)?;
@@ -490,10 +595,14 @@ pub fn unpack_novel_archive(
             &entry.chapter_id,
             &dest.to_string_lossy(),
             bytes.len() as i64,
-            0,
+            word_count,
             Some(&entry.sha256),
         )?;
         res.chapters_restored += 1;
+    }
+
+    if !manifest.chapters.is_empty() || novel.is_local {
+        let _ = db.ensure_novel_in_library(&novel_id);
     }
 
     Ok(res)
@@ -645,6 +754,7 @@ mod tests {
         let manifest = BookArchiveManifest {
             version: 1,
             novel_id: "gut:1".into(),
+            novel: None,
             cover_filename: None,
             cover_sha256: None,
             chapters: vec![BookArchiveChapterEntry {
@@ -652,6 +762,7 @@ mod tests {
                 filename: "../../evil.json".into(),
                 size_bytes: 2,
                 sha256: "abc".into(),
+                chapter: None,
             }],
         };
 
@@ -665,5 +776,56 @@ mod tests {
         }
 
         assert!(unpack_novel_archive(&buf.into_inner(), &db, dir.path()).is_err());
+    }
+
+    #[test]
+    fn test_unpack_self_contained_book_into_empty_db_creates_library_entry() {
+        let dir_a = TempDir::new().unwrap();
+        let dir_b = TempDir::new().unwrap();
+
+        let novel_a = mk_novel("gut:1342", None);
+        let ch_path_a = DownloadManager::chapter_file_path(dir_a.path(), "gut:1342", "gut:1342:1", 1.0);
+        std::fs::create_dir_all(ch_path_a.parent().unwrap()).unwrap();
+        let payload = StoredChapterPayload {
+            chapter_id: "gut:1342:1".into(),
+            novel_id: "gut:1342".into(),
+            chapter_number: 1.0,
+            title: "Chapter 1".into(),
+            html: "<p>Hello world</p>".into(),
+            paragraphs: vec!["Hello world".into()],
+            word_count: 2,
+        };
+        let ch_bytes = serde_json::to_vec(&payload).unwrap();
+        std::fs::write(&ch_path_a, &ch_bytes).unwrap();
+
+        let chapters_a = vec![Chapter {
+            id: "gut:1342:1".into(),
+            novel_id: "gut:1342".into(),
+            external_id: "1".into(),
+            chapter_number: 1.0,
+            volume: None,
+            title: "Chapter 1".into(),
+            url: None,
+            word_count: 2,
+            published_at: None,
+            is_downloaded: true,
+            local_path: Some(ch_path_a.to_string_lossy().to_string()),
+            size_bytes: ch_bytes.len() as i64,
+        }];
+
+        let (zip_bytes, _, count) = pack_novel_archive(&novel_a, &chapters_a, dir_a.path())
+            .unwrap()
+            .unwrap();
+        assert_eq!(count, 1);
+
+        // Unpack into a completely empty DB (simulating "Download to Device" from Google Drive `downloads/`)
+        let db_b = Database::open_in_memory().unwrap();
+        let unpacked = unpack_novel_archive(&zip_bytes, &db_b, dir_b.path()).unwrap();
+        assert_eq!(unpacked.chapters_restored, 1);
+
+        let items = db_b.list_library_items().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].novel.id, "gut:1342");
+        assert_eq!(items[0].downloaded_chapters, 1);
     }
 }

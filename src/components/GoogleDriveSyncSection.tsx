@@ -3,6 +3,7 @@ import {
   CheckCircle2,
   Cloud,
   Copy,
+  Download,
   ExternalLink,
   FolderCheck,
   KeyRound,
@@ -12,9 +13,10 @@ import {
   ShieldCheck,
 } from "lucide-react";
 import { api, extractErrorMessage } from "../api/tauri";
-import { extractGoogleDriveFolderId, formatRelativeDate } from "../utils/format";
+import { extractGoogleDriveFolderId, formatBytes, formatRelativeDate } from "../utils/format";
 import type {
   AppSettings,
+  GoogleDriveCloudBook,
   GoogleDriveOAuthStartResult,
   GoogleDriveSyncReport,
   GoogleDriveSyncStatus,
@@ -49,8 +51,23 @@ export const GoogleDriveSyncSection: React.FC<GoogleDriveSyncSectionProps> = ({
   const [verifying, setVerifying] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [lastReport, setLastReport] = useState<GoogleDriveSyncReport | null>(null);
+  const [cloudBooks, setCloudBooks] = useState<GoogleDriveCloudBook[]>([]);
+  const [loadingCloudBooks, setLoadingCloudBooks] = useState(false);
+  const [downloadingFileId, setDownloadingFileId] = useState<string | null>(null);
   const onNotifyRef = useRef(onNotify);
   onNotifyRef.current = onNotify;
+
+  const loadCloudBooks = async (silent = false) => {
+    setLoadingCloudBooks(true);
+    try {
+      const books = await api.listGdriveCloudBooks();
+      setCloudBooks(books);
+    } catch (e) {
+      if (!silent) onNotifyRef.current(extractErrorMessage(e), true);
+    } finally {
+      setLoadingCloudBooks(false);
+    }
+  };
 
   const applyStatusToForm = (st: GoogleDriveSyncStatus) => {
     setStatus(st);
@@ -62,6 +79,9 @@ export const GoogleDriveSyncSection: React.FC<GoogleDriveSyncSectionProps> = ({
     setSyncDownloadedBooks(st.sync_downloaded_books);
     setSyncSettings(st.sync_settings);
     setAutoSyncOnLaunch(st.auto_sync_on_launch);
+    if (st.connected && st.folder_id) {
+      loadCloudBooks(true);
+    }
   };
 
   useEffect(() => {
@@ -238,11 +258,27 @@ export const GoogleDriveSyncSection: React.FC<GoogleDriveSyncSectionProps> = ({
       onNotify(
         `Synced: ${report.novels_merged} books merged, ${report.books_downloaded} downloaded, ${report.books_uploaded} uploaded`,
       );
+      await loadCloudBooks(true);
     } catch (e) {
       api.getGdriveSyncStatus().then(applyStatusToForm).catch(() => {});
       onNotify(extractErrorMessage(e), true);
     } finally {
       setSyncing(false);
+    }
+  };
+
+  const handleDownloadCloudBook = async (book: GoogleDriveCloudBook) => {
+    setDownloadingFileId(book.file_id);
+    try {
+      const report = await api.downloadGdriveBookToDevice(book.file_id, book.novel_id);
+      onNotify(
+        `Downloaded "${book.title}" from Google Drive (${report.chapters_downloaded} chapters restored)`,
+      );
+      await loadCloudBooks(true);
+    } catch (e) {
+      onNotify(extractErrorMessage(e), true);
+    } finally {
+      setDownloadingFileId(null);
     }
   };
 
@@ -597,6 +633,93 @@ export const GoogleDriveSyncSection: React.FC<GoogleDriveSyncSectionProps> = ({
                 ? `Merged ${lastReport.novels_merged} books (${lastReport.library_entries_merged} library entries) · downloaded ${lastReport.books_downloaded} book(s) (${lastReport.chapters_downloaded} chapters) · uploaded ${lastReport.books_uploaded} book(s)`
                 : status?.last_sync_summary}
             </div>
+          </div>
+        )}
+
+        {/* Cloud Books in Google Drive (Download to Device) */}
+        {status?.connected && status?.folder_id && (
+          <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-4 space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <h4 className="text-xs font-semibold text-[var(--text-primary)] flex items-center gap-1.5">
+                  <Cloud className="w-3.5 h-3.5 text-[var(--accent-hover)]" />
+                  Cloud Books in Google Drive ({cloudBooks.length})
+                </h4>
+                <p className="text-[11px] text-[var(--text-muted)] mt-0.5">
+                  Offline books stored in your Google Drive <code>downloads/</code> subfolder. Click{" "}
+                  <strong>Download to Device</strong> to save any book offline with its bookmarks and reading progress.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => loadCloudBooks(false)}
+                disabled={loadingCloudBooks}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium border border-[var(--border-subtle)] bg-[var(--bg-surface)] hover:bg-[var(--bg-hover)] disabled:opacity-50"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${loadingCloudBooks ? "animate-spin" : ""}`} />
+                Refresh Cloud
+              </button>
+            </div>
+
+            {loadingCloudBooks && cloudBooks.length === 0 ? (
+              <div className="py-4 text-center text-xs text-[var(--text-muted)] flex items-center justify-center gap-2">
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                Checking Google Drive <code>downloads/</code> folder…
+              </div>
+            ) : cloudBooks.length === 0 ? (
+              <div className="py-3 text-xs text-[var(--text-muted)]">
+                No downloaded books in Google Drive <code>downloads/</code> yet. Click{" "}
+                <strong>Sync Now</strong> to upload books downloaded on this device.
+              </div>
+            ) : (
+              <div className="divide-y divide-[var(--border-subtle)] rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] overflow-hidden">
+                {cloudBooks.map((book) => {
+                  const busy = downloadingFileId === book.file_id;
+                  return (
+                    <div
+                      key={book.file_id}
+                      className="p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5"
+                    >
+                      <div className="min-w-0">
+                        <div className="text-xs font-semibold text-[var(--text-primary)] truncate">
+                          {book.title}
+                        </div>
+                        <div className="text-[11px] text-[var(--text-muted)] flex flex-wrap items-center gap-1.5 mt-0.5">
+                          <span>{book.author}</span>
+                          {book.chapter_count > 0 && <span>· {book.chapter_count} ch</span>}
+                          {book.size_bytes > 0 && <span>· {formatBytes(book.size_bytes)}</span>}
+                          <span className="px-1.5 py-0.2 rounded bg-[var(--bg-elevated)] border border-[var(--border-subtle)] font-mono text-[10px]">
+                            {book.folder_name}/
+                          </span>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        {book.is_downloaded_locally && (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium border border-emerald-500/30 bg-emerald-500/10 text-emerald-300">
+                            <CheckCircle2 className="w-3 h-3" />
+                            On Device
+                          </span>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => handleDownloadCloudBook(book)}
+                          disabled={busy}
+                          className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium text-white disabled:opacity-50"
+                          style={{ backgroundColor: "var(--accent)" }}
+                        >
+                          {busy ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          ) : (
+                            <Download className="w-3.5 h-3.5" />
+                          )}
+                          {book.is_downloaded_locally ? "Re-download to Device" : "Download to Device"}
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         )}
       </div>

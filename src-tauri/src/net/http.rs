@@ -26,7 +26,7 @@ impl RobotsPolicy {
         Self {
             disallow: Vec::new(),
             allow: Vec::new(),
-            crawl_delay_ms: 200,
+            crawl_delay_ms: 80,
             fetched_at: Instant::now(),
         }
     }
@@ -191,8 +191,8 @@ impl SourceHttpClient {
 
         let client = Client::builder()
             .default_headers(headers)
-            .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(25))
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(12))
             .build()?;
 
         Ok(Self {
@@ -228,7 +228,7 @@ impl SourceHttpClient {
         let policy = match self
             .client
             .get(&robots_url)
-            .timeout(Duration::from_secs(5))
+            .timeout(Duration::from_millis(2000))
             .send()
             .await
         {
@@ -258,9 +258,9 @@ impl SourceHttpClient {
             if !policy.is_path_allowed(&path_q) {
                 return Err(AppError::RobotsDisallowed(url_str.to_string()));
             }
-            policy.crawl_delay_ms
+            policy.crawl_delay_ms.min(400)
         } else {
-            100
+            40
         };
 
         // Respect per-domain rate limiting without blocking other domains

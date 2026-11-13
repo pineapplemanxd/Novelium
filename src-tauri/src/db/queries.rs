@@ -514,6 +514,7 @@ impl Database {
         word_count: i64,
         content_hash: Option<&str>,
     ) -> AppResult<()> {
+        let now = now_iso();
         self.with_conn(|conn| {
             conn.execute(
                 r#"
@@ -526,6 +527,19 @@ impl Database {
                 WHERE id = ?1
                 "#,
                 params![chapter_id, local_path, size_bytes, word_count, content_hash],
+            )?;
+            conn.execute(
+                r#"
+                INSERT OR IGNORE INTO library_entries (
+                    novel_id, status, is_bookmarked, follow_updates, last_checked_chapters, added_at, updated_at
+                )
+                SELECT c.novel_id, 'reading', 0, 0,
+                       (SELECT COUNT(*) FROM chapters c2 WHERE c2.novel_id = c.novel_id),
+                       ?2, ?2
+                FROM chapters c
+                WHERE c.id = ?1
+                "#,
+                params![chapter_id, now],
             )?;
             Ok(())
         })
@@ -820,7 +834,52 @@ impl Database {
         })
     }
 
+    pub fn ensure_novel_in_library(&self, novel_id: &str) -> AppResult<()> {
+        let now = now_iso();
+        self.with_conn(|conn| {
+            conn.execute(
+                r#"
+                INSERT OR IGNORE INTO library_entries (
+                    novel_id, status, is_bookmarked, follow_updates, last_checked_chapters, added_at, updated_at
+                )
+                SELECT n.id, 'reading', 0, 0,
+                       (SELECT COUNT(*) FROM chapters c WHERE c.novel_id = n.id),
+                       ?2, ?2
+                FROM novels n
+                WHERE n.id = ?1
+                "#,
+                params![novel_id, now],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn ensure_downloaded_novels_in_library(&self) -> AppResult<usize> {
+        let now = now_iso();
+        self.with_conn(|conn| {
+            let inserted = conn.execute(
+                r#"
+                INSERT OR IGNORE INTO library_entries (
+                    novel_id, status, is_bookmarked, follow_updates, last_checked_chapters, added_at, updated_at
+                )
+                SELECT n.id, 'reading', 0, 0,
+                       (SELECT COUNT(*) FROM chapters c WHERE c.novel_id = n.id),
+                       ?1, ?1
+                FROM novels n
+                WHERE n.is_local = 1
+                   OR EXISTS (
+                       SELECT 1 FROM chapters c
+                       WHERE c.novel_id = n.id AND c.is_downloaded = 1
+                   )
+                "#,
+                params![now],
+            )?;
+            Ok(inserted)
+        })
+    }
+
     pub fn list_library_items(&self) -> AppResult<Vec<LibraryNovelItem>> {
+        let _ = self.ensure_downloaded_novels_in_library();
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
                 r#"
@@ -1675,6 +1734,7 @@ impl Database {
     // Export / Import Library Bundle
     // -------------------------------------------------------------------------
     pub fn export_bundle(&self, default_download_dir: &str) -> AppResult<LibraryExportBundle> {
+        let _ = self.ensure_downloaded_novels_in_library();
         let settings = self.load_settings(default_download_dir)?;
         let collections = self.list_collections()?;
         let bookmarks = self.list_bookmarks(None)?;
@@ -1945,7 +2005,16 @@ impl Database {
                     _ => None,
                 };
                 tx.execute(
-                    "INSERT OR IGNORE INTO bookmarks (id, novel_id, chapter_id, paragraph_index, excerpt, note, color, is_novel_bookmark, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    r#"
+                    INSERT INTO bookmarks (id, novel_id, chapter_id, paragraph_index, excerpt, note, color, is_novel_bookmark, created_at)
+                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                    ON CONFLICT(id) DO UPDATE SET
+                        chapter_id = COALESCE(excluded.chapter_id, bookmarks.chapter_id),
+                        paragraph_index = COALESCE(excluded.paragraph_index, bookmarks.paragraph_index),
+                        excerpt = COALESCE(excluded.excerpt, bookmarks.excerpt),
+                        note = excluded.note,
+                        color = excluded.color
+                    "#,
                     params![
                         bm.id,
                         bm.novel_id,

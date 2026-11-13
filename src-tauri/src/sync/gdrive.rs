@@ -17,12 +17,12 @@ use crate::db::Database;
 use crate::downloads::DownloadManager;
 use crate::error::{AppError, AppResult};
 use crate::models::{
-    GoogleDriveOAuthStartResult, GoogleDriveSyncConfig, GoogleDriveSyncReport,
-    GoogleDriveSyncStatus, LibraryExportBundle,
+    GoogleDriveCloudBook, GoogleDriveOAuthStartResult, GoogleDriveSyncConfig,
+    GoogleDriveSyncReport, GoogleDriveSyncStatus, LibraryExportBundle,
 };
 use crate::sync::{
     compute_novel_archive_digest, novel_archive_filename, pack_novel_archive,
-    parse_google_drive_folder_id, unpack_novel_archive, GoogleDriveSyncCoordinator,
+    parse_google_drive_folder_id, unpack_novel_archive_with_hints, GoogleDriveSyncCoordinator,
     PendingOAuthSession,
 };
 
@@ -39,6 +39,7 @@ const GOOGLE_OAUTH_SCOPES: &str = "https://www.googleapis.com/auth/drive";
 
 const LIBRARY_BUNDLE_FILENAME: &str = "novelium-library.json";
 const BOOKS_SUBFOLDER_NAME: &str = "books";
+const DOWNLOADS_SUBFOLDER_NAME: &str = "downloads";
 const FOLDER_MIME: &str = "application/vnd.google-apps.folder";
 const OAUTH_TIMEOUT_SECS: u64 = 180;
 
@@ -95,6 +96,12 @@ pub struct DriveFileItem {
     pub name: String,
     #[serde(default)]
     pub mime_type: String,
+    #[serde(default)]
+    pub size: Option<String>,
+    #[serde(default)]
+    pub modified_time: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
     #[serde(default)]
     pub trashed: Option<bool>,
     #[serde(default)]
@@ -511,7 +518,10 @@ async fn list_drive_folder_files(
                 .get(GOOGLE_DRIVE_FILES_ENDPOINT)
                 .query(&[
                     ("q", q.as_str()),
-                    ("fields", "nextPageToken,files(id,name,mimeType,trashed,appProperties)"),
+                    (
+                        "fields",
+                        "nextPageToken,files(id,name,mimeType,size,modifiedTime,description,trashed,appProperties)",
+                    ),
                     ("pageSize", "1000"),
                     ("supportsAllDrives", "true"),
                     ("includeItemsFromAllDrives", "true"),
@@ -798,6 +808,93 @@ async fn write_http_response(
     let _ = stream.flush().await;
 }
 
+fn truncate_drive_prop(val: &str, max_bytes: usize) -> String {
+    let trimmed = val.trim();
+    if trimmed.len() <= max_bytes {
+        return trimmed.to_string();
+    }
+    let mut end = max_bytes;
+    while end > 0 && !trimmed.is_char_boundary(end) {
+        end -= 1;
+    }
+    trimmed[..end].to_string()
+}
+
+fn infer_novel_id_from_drive_item(
+    item: &DriveFileItem,
+    local_by_archive_name: &HashMap<String, String>,
+) -> String {
+    if let Some(nid) = item
+        .app_properties
+        .as_ref()
+        .and_then(|m| m.get("noveliumNovelId"))
+        .filter(|s| !s.trim().is_empty())
+    {
+        return nid.clone();
+    }
+    if let Some(nid) = local_by_archive_name.get(&item.name) {
+        return nid.clone();
+    }
+    let stem = item
+        .name
+        .strip_suffix(".novelium.zip")
+        .unwrap_or(&item.name);
+    if let Some((src, rest)) = stem.split_once('_') {
+        format!("{src}:{rest}")
+    } else {
+        stem.to_string()
+    }
+}
+
+fn extract_title_from_drive_item(item: &DriveFileItem, fallback_title: Option<&str>) -> String {
+    if let Some(t) = item
+        .app_properties
+        .as_ref()
+        .and_then(|m| m.get("noveliumTitle"))
+        .filter(|s| !s.trim().is_empty())
+    {
+        return t.clone();
+    }
+    if let Some(desc) = item.description.as_deref() {
+        if let Some(rest) = desc.strip_prefix("Novelium offline book package: ") {
+            let title = rest.split(" — by ").next().unwrap_or(rest).trim();
+            if !title.is_empty() {
+                return title.to_string();
+            }
+        }
+    }
+    if let Some(fb) = fallback_title.filter(|s| !s.trim().is_empty()) {
+        return fb.to_string();
+    }
+    item.name
+        .strip_suffix(".novelium.zip")
+        .unwrap_or(&item.name)
+        .replace('_', " ")
+}
+
+fn extract_author_from_drive_item(item: &DriveFileItem, fallback_author: Option<&str>) -> String {
+    if let Some(a) = item
+        .app_properties
+        .as_ref()
+        .and_then(|m| m.get("noveliumAuthor"))
+        .filter(|s| !s.trim().is_empty())
+    {
+        return a.clone();
+    }
+    if let Some(desc) = item.description.as_deref() {
+        if let Some((_, author)) = desc.split_once(" — by ") {
+            let a = author.trim();
+            if !a.is_empty() {
+                return a.to_string();
+            }
+        }
+    }
+    fallback_author
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or("Synced Book")
+        .to_string()
+}
+
 impl GoogleDriveSyncCoordinator {
     pub async fn start_oauth(
         &self,
@@ -996,8 +1093,38 @@ impl GoogleDriveSyncCoordinator {
         };
 
         let folder = verify_drive_folder(&self.http, &mut cfg, db, &folder_id).await?;
-        cfg.folder_id = folder.id;
+        cfg.folder_id = folder.id.clone();
         cfg.folder_name = Some(folder.name);
+
+        if let Ok(root_files) = list_drive_folder_files(&self.http, &mut cfg, db, &folder.id).await {
+            let has_books = root_files
+                .iter()
+                .any(|f| f.name == BOOKS_SUBFOLDER_NAME && f.mime_type == FOLDER_MIME);
+            if !has_books {
+                let _ = create_drive_subfolder(
+                    &self.http,
+                    &mut cfg,
+                    db,
+                    &folder.id,
+                    BOOKS_SUBFOLDER_NAME,
+                )
+                .await;
+            }
+            let has_downloads = root_files
+                .iter()
+                .any(|f| f.name == DOWNLOADS_SUBFOLDER_NAME && f.mime_type == FOLDER_MIME);
+            if !has_downloads {
+                let _ = create_drive_subfolder(
+                    &self.http,
+                    &mut cfg,
+                    db,
+                    &folder.id,
+                    DOWNLOADS_SUBFOLDER_NAME,
+                )
+                .await;
+            }
+        }
+
         db.save_gdrive_config(&cfg)?;
         Ok(Self::redact_status(&cfg))
     }
@@ -1015,6 +1142,254 @@ impl GoogleDriveSyncCoordinator {
         Ok(Self::redact_status(&cfg))
     }
 
+    pub async fn list_cloud_books(
+        &self,
+        db: &Database,
+        downloads: &DownloadManager,
+    ) -> AppResult<Vec<GoogleDriveCloudBook>> {
+        let mut cfg = db.load_gdrive_config()?;
+        if cfg.client_id.trim().is_empty() {
+            return Err(AppError::InvalidInput(
+                "Configure your Google OAuth Client ID and connect Google Drive first.".into(),
+            ));
+        }
+
+        let folder_id = if !cfg.folder_id.trim().is_empty() {
+            cfg.folder_id.clone()
+        } else {
+            parse_google_drive_folder_id(&cfg.folder_input)?
+        };
+        if cfg.folder_id != folder_id {
+            cfg.folder_id = folder_id.clone();
+            db.save_gdrive_config(&cfg)?;
+        }
+
+        let root_files = list_drive_folder_files(&self.http, &mut cfg, db, &folder_id).await?;
+        let existing_downloads_folder = root_files
+            .iter()
+            .find(|f| f.name == DOWNLOADS_SUBFOLDER_NAME && f.mime_type == FOLDER_MIME)
+            .cloned();
+        let existing_books_folder = root_files
+            .iter()
+            .find(|f| f.name == BOOKS_SUBFOLDER_NAME && f.mime_type == FOLDER_MIME)
+            .cloned();
+
+        let downloads_folder_id = match existing_downloads_folder {
+            Some(f) => f.id,
+            None => {
+                create_drive_subfolder(
+                    &self.http,
+                    &mut cfg,
+                    db,
+                    &folder_id,
+                    DOWNLOADS_SUBFOLDER_NAME,
+                )
+                .await?
+                .id
+            }
+        };
+
+        let mut tagged_files: Vec<(String, DriveFileItem)> = Vec::new();
+        let mut seen_names = std::collections::HashSet::new();
+
+        let dl_files =
+            list_drive_folder_files(&self.http, &mut cfg, db, &downloads_folder_id).await?;
+        for f in dl_files {
+            if f.name.ends_with(".novelium.zip") {
+                seen_names.insert(f.name.clone());
+                tagged_files.push((DOWNLOADS_SUBFOLDER_NAME.to_string(), f));
+            }
+        }
+
+        if let Some(bf) = existing_books_folder {
+            if let Ok(book_files) =
+                list_drive_folder_files(&self.http, &mut cfg, db, &bf.id).await
+            {
+                for f in book_files {
+                    if !f.name.ends_with(".novelium.zip") || seen_names.contains(&f.name) {
+                        continue;
+                    }
+                    let ch_prop = f
+                        .app_properties
+                        .as_ref()
+                        .and_then(|m| m.get("noveliumChapters"))
+                        .and_then(|s| s.parse::<usize>().ok());
+                    if ch_prop == Some(0) {
+                        continue;
+                    }
+                    seen_names.insert(f.name.clone());
+                    tagged_files.push((BOOKS_SUBFOLDER_NAME.to_string(), f));
+                }
+            }
+        }
+
+        let local_novels = db.list_all_novels()?;
+        let mut local_by_id = HashMap::new();
+        let mut local_by_archive = HashMap::new();
+        for n in local_novels {
+            local_by_archive.insert(novel_archive_filename(&n.id), n.id.clone());
+            local_by_id.insert(n.id.clone(), n);
+        }
+
+        let download_dir = downloads.current_download_dir();
+        let mut out = Vec::new();
+
+        for (folder_name, item) in tagged_files {
+            let novel_id = infer_novel_id_from_drive_item(&item, &local_by_archive);
+            let local_novel = local_by_id.get(&novel_id);
+            let local_chs = db.get_chapters(&novel_id).unwrap_or_default();
+            let local_dl_count = local_chs
+                .iter()
+                .filter(|c| {
+                    c.is_downloaded
+                        && c.local_path
+                            .as_deref()
+                            .map(|lp| DownloadManager::relocate_library_path(lp, &download_dir).exists())
+                            .unwrap_or(false)
+                })
+                .count();
+
+            let prop_chapters = item
+                .app_properties
+                .as_ref()
+                .and_then(|m| m.get("noveliumChapters"))
+                .and_then(|s| s.parse::<usize>().ok());
+            let chapter_count = prop_chapters
+                .or_else(|| {
+                    if local_dl_count > 0 {
+                        Some(local_dl_count)
+                    } else if !local_chs.is_empty() {
+                        Some(local_chs.len())
+                    } else {
+                        local_novel.map(|n| n.chapter_count.max(0) as usize)
+                    }
+                })
+                .unwrap_or(0);
+
+            let size_bytes = item
+                .size
+                .as_deref()
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(0);
+
+            // Skip legacy cover-only archives in `books/` that have 0 chapters
+            if folder_name == BOOKS_SUBFOLDER_NAME && prop_chapters.is_none() && local_dl_count == 0 && local_chs.is_empty() {
+                continue;
+            }
+
+            let title = extract_title_from_drive_item(&item, local_novel.map(|n| n.title.as_str()));
+            let author = extract_author_from_drive_item(&item, local_novel.map(|n| n.author.as_str()));
+            let updated_at = item
+                .app_properties
+                .as_ref()
+                .and_then(|m| m.get("noveliumUpdatedAt"))
+                .cloned()
+                .or_else(|| item.modified_time.clone());
+
+            let remote_digest = item
+                .app_properties
+                .as_ref()
+                .and_then(|m| m.get("noveliumDigest"))
+                .map(|s| s.as_str());
+            let local_digest = local_novel
+                .and_then(|n| compute_novel_archive_digest(n, &local_chs, &download_dir));
+            let is_downloaded_locally = local_dl_count > 0
+                && (remote_digest.is_none() || local_digest.as_deref() == remote_digest);
+
+            out.push(GoogleDriveCloudBook {
+                file_id: item.id,
+                filename: item.name,
+                folder_name,
+                novel_id,
+                title,
+                author,
+                chapter_count,
+                size_bytes,
+                updated_at,
+                is_downloaded_locally,
+            });
+        }
+
+        out.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
+        Ok(out)
+    }
+
+    pub async fn download_cloud_book_to_device(
+        &self,
+        db: &Database,
+        downloads: &DownloadManager,
+        file_id: &str,
+        novel_id_hint: Option<&str>,
+        app_handle: Option<&AppHandle>,
+    ) -> AppResult<GoogleDriveSyncReport> {
+        let _sync_guard = self.sync_lock.try_lock().map_err(|_| {
+            AppError::InvalidInput("Google Drive sync is already in progress.".into())
+        })?;
+
+        let mut cfg = db.load_gdrive_config()?;
+        let folder_id = if !cfg.folder_id.trim().is_empty() {
+            cfg.folder_id.clone()
+        } else {
+            parse_google_drive_folder_id(&cfg.folder_input)?
+        };
+
+        let mut report = GoogleDriveSyncReport {
+            folder_id: folder_id.clone(),
+            folder_name: cfg.folder_name.clone(),
+            synced_at: Utc::now().to_rfc3339(),
+            ..Default::default()
+        };
+
+        // Also pull remote library bundle if present so novel metadata, bookmarks, highlights & progress are synced
+        let mut remote_bundle_opt: Option<LibraryExportBundle> = None;
+        if let Ok(root_files) = list_drive_folder_files(&self.http, &mut cfg, db, &folder_id).await {
+            if let Some(lib_file) = root_files
+                .iter()
+                .find(|f| f.name == LIBRARY_BUNDLE_FILENAME && f.mime_type != FOLDER_MIME)
+            {
+                if let Ok(bytes) = download_drive_file(&self.http, &mut cfg, db, &lib_file.id).await {
+                    if let Ok(bundle) = serde_json::from_slice::<LibraryExportBundle>(&bytes) {
+                        let (novels_n, entries_n, _) = db.merge_bundle(&bundle, false)?;
+                        report.novels_merged = novels_n;
+                        report.library_entries_merged = entries_n;
+                        remote_bundle_opt = Some(bundle);
+                    }
+                }
+            }
+        }
+
+        let download_dir = downloads.current_download_dir();
+        std::fs::create_dir_all(&download_dir)?;
+
+        let zip_bytes = download_drive_file(&self.http, &mut cfg, db, file_id).await?;
+        let unpacked = unpack_novel_archive_with_hints(
+            &zip_bytes,
+            db,
+            &download_dir,
+            novel_id_hint,
+            None,
+        )?;
+        if unpacked.chapters_restored > 0 || unpacked.cover_restored {
+            report.books_downloaded = 1;
+            report.chapters_downloaded = unpacked.chapters_restored;
+        }
+        if !unpacked.novel_id.is_empty() {
+            let _ = db.ensure_novel_in_library(&unpacked.novel_id);
+        }
+
+        // Re-apply bundle merge after unpacking so bookmarks, highlights & reading progress attach to unpacked chapters
+        if let Some(ref bundle) = remote_bundle_opt {
+            let _ = db.merge_bundle(bundle, false);
+        }
+
+        if let Some(app) = app_handle {
+            let status = Self::redact_status(&cfg);
+            let _ = app.emit("gdrive-sync-updated", &status);
+        }
+
+        Ok(report)
+    }
+
     pub async fn run_sync(
         &self,
         db: &Database,
@@ -1025,6 +1400,8 @@ impl GoogleDriveSyncCoordinator {
         let _sync_guard = self.sync_lock.try_lock().map_err(|_| {
             AppError::InvalidInput("Google Drive sync is already in progress.".into())
         })?;
+
+        let _ = db.ensure_downloaded_novels_in_library();
 
         let mut cfg = db.load_gdrive_config()?;
         if cfg.client_id.trim().is_empty() {
@@ -1055,6 +1432,34 @@ impl GoogleDriveSyncCoordinator {
             .iter()
             .find(|f| f.name == BOOKS_SUBFOLDER_NAME && f.mime_type == FOLDER_MIME)
             .cloned();
+        let existing_downloads_folder = root_files
+            .iter()
+            .find(|f| f.name == DOWNLOADS_SUBFOLDER_NAME && f.mime_type == FOLDER_MIME)
+            .cloned();
+
+        // Ensure both `books` and `downloads` subfolders exist inside the main Drive folder
+        let books_folder_id = match existing_books_folder {
+            Some(f) => f.id,
+            None => {
+                create_drive_subfolder(&self.http, &mut cfg, db, &folder_id, BOOKS_SUBFOLDER_NAME)
+                    .await?
+                    .id
+            }
+        };
+        let downloads_folder_id = match existing_downloads_folder {
+            Some(f) => f.id,
+            None => {
+                create_drive_subfolder(
+                    &self.http,
+                    &mut cfg,
+                    db,
+                    &folder_id,
+                    DOWNLOADS_SUBFOLDER_NAME,
+                )
+                .await?
+                .id
+            }
+        };
 
         let mut report = GoogleDriveSyncReport {
             folder_id: folder_id.clone(),
@@ -1064,6 +1469,7 @@ impl GoogleDriveSyncCoordinator {
         };
 
         // Step 1: Pull remote library bundle & two-way merge metadata, progress, bookmarks & highlights
+        let mut remote_bundle_opt: Option<LibraryExportBundle> = None;
         if let Some(ref lib_file) = remote_library_file {
             let bytes = download_drive_file(&self.http, &mut cfg, db, &lib_file.id).await?;
             let remote_bundle: LibraryExportBundle = serde_json::from_slice(&bytes).map_err(|e| {
@@ -1074,27 +1480,23 @@ impl GoogleDriveSyncCoordinator {
             report.novels_merged = novels_n;
             report.library_entries_merged = entries_n;
             report.settings_applied = settings_applied;
+            remote_bundle_opt = Some(remote_bundle);
         }
 
         let download_dir = downloads.current_download_dir();
         std::fs::create_dir_all(&download_dir)?;
 
-        // Step 2 & 3: Two-way sync of downloaded book archives inside `<folder>/books/`
+        // Step 2 & 3: Two-way sync of downloaded book archives inside `<folder>/downloads/` (and legacy `<folder>/books/`)
         if cfg.sync_downloaded_books {
-            let books_folder_id = match existing_books_folder {
-                Some(f) => f.id,
-                None => {
-                    create_drive_subfolder(&self.http, &mut cfg, db, &folder_id, BOOKS_SUBFOLDER_NAME)
-                        .await?
-                        .id
-                }
-            };
-
-            let remote_book_files =
+            let remote_downloads_files =
+                list_drive_folder_files(&self.http, &mut cfg, db, &downloads_folder_id).await?;
+            let remote_books_files =
                 list_drive_folder_files(&self.http, &mut cfg, db, &books_folder_id).await?;
-            let mut remote_by_name: HashMap<String, DriveFileItem> = HashMap::new();
-            let mut remote_by_novel_id: HashMap<String, DriveFileItem> = HashMap::new();
-            for f in remote_book_files {
+
+            // Index files in `downloads/` (primary target for uploads & downloads)
+            let mut downloads_by_name: HashMap<String, DriveFileItem> = HashMap::new();
+            let mut downloads_by_novel_id: HashMap<String, DriveFileItem> = HashMap::new();
+            for f in remote_downloads_files {
                 if !f.name.ends_with(".novelium.zip") {
                     continue;
                 }
@@ -1104,64 +1506,124 @@ impl GoogleDriveSyncCoordinator {
                     .and_then(|m| m.get("noveliumNovelId"))
                     .cloned()
                 {
-                    remote_by_novel_id.insert(nid, f.clone());
+                    downloads_by_novel_id.insert(nid, f.clone());
                 }
-                remote_by_name.insert(f.name.clone(), f);
+                downloads_by_name.insert(f.name.clone(), f);
+            }
+
+            // Combine `downloads/` + non-empty legacy `books/` archives for pulling onto this device
+            let mut pull_candidates: Vec<(bool, DriveFileItem)> = downloads_by_name
+                .values()
+                .cloned()
+                .map(|f| (true, f))
+                .collect();
+            for f in remote_books_files {
+                if !f.name.ends_with(".novelium.zip") || downloads_by_name.contains_key(&f.name) {
+                    continue;
+                }
+                let ch_prop = f
+                    .app_properties
+                    .as_ref()
+                    .and_then(|m| m.get("noveliumChapters"))
+                    .and_then(|s| s.parse::<usize>().ok());
+                if ch_prop == Some(0) {
+                    continue;
+                }
+                pull_candidates.push((false, f));
             }
 
             // Step 2: Pull remote book archives that are missing or differ locally
             let local_novels = db.list_all_novels()?;
+            let mut local_by_id: HashMap<String, crate::models::NovelRecord> = HashMap::new();
+            let mut local_by_archive: HashMap<String, String> = HashMap::new();
             let mut chapters_cache: HashMap<String, Vec<crate::models::Chapter>> = HashMap::new();
-            for novel in &local_novels {
+            for novel in local_novels {
                 chapters_cache.insert(novel.id.clone(), db.get_chapters(&novel.id)?);
+                local_by_archive.insert(novel_archive_filename(&novel.id), novel.id.clone());
+                local_by_id.insert(novel.id.clone(), novel);
             }
 
-            for novel in &local_novels {
-                let archive_name = novel_archive_filename(&novel.id);
-                let remote_file = remote_by_novel_id
-                    .get(&novel.id)
-                    .or_else(|| remote_by_name.get(&archive_name));
-                let Some(remote_item) = remote_file else {
-                    continue;
-                };
+            for (from_downloads_folder, remote_item) in &pull_candidates {
+                let novel_id = infer_novel_id_from_drive_item(remote_item, &local_by_archive);
                 let remote_digest = remote_item
                     .app_properties
                     .as_ref()
                     .and_then(|m| m.get("noveliumDigest"))
                     .map(|s| s.as_str());
-                let chs = chapters_cache
-                    .get(&novel.id)
-                    .map(|v| v.as_slice())
-                    .unwrap_or(&[]);
-                let local_digest = compute_novel_archive_digest(novel, chs, &download_dir);
+
+                let local_digest = local_by_id.get(&novel_id).and_then(|novel| {
+                    let chs = chapters_cache
+                        .get(&novel_id)
+                        .map(|v| v.as_slice())
+                        .unwrap_or(&[]);
+                    compute_novel_archive_digest(novel, chs, &download_dir)
+                });
 
                 if local_digest.as_deref() == remote_digest && local_digest.is_some() {
                     continue;
                 }
 
+                // If in legacy `books/` folder and novel has 0 chapters in DB, only pull if it's from `downloads/` or has chapters
+                if !*from_downloads_folder {
+                    let known_chs = chapters_cache.get(&novel_id).map(|v| v.len()).unwrap_or(0);
+                    let prop_chs = remote_item
+                        .app_properties
+                        .as_ref()
+                        .and_then(|m| m.get("noveliumChapters"))
+                        .and_then(|s| s.parse::<usize>().ok())
+                        .unwrap_or(known_chs);
+                    if prop_chs == 0 {
+                        continue;
+                    }
+                }
+
+                let title_hint = extract_title_from_drive_item(
+                    remote_item,
+                    local_by_id.get(&novel_id).map(|n| n.title.as_str()),
+                );
+                let author_hint = extract_author_from_drive_item(
+                    remote_item,
+                    local_by_id.get(&novel_id).map(|n| n.author.as_str()),
+                );
+
                 let zip_bytes =
                     download_drive_file(&self.http, &mut cfg, db, &remote_item.id).await?;
-                let unpacked = unpack_novel_archive(&zip_bytes, db, &download_dir)?;
-                if unpacked.chapters_restored > 0 || unpacked.cover_restored {
+                let unpacked = unpack_novel_archive_with_hints(
+                    &zip_bytes,
+                    db,
+                    &download_dir,
+                    Some(&title_hint),
+                    Some(&author_hint),
+                )?;
+                if unpacked.chapters_restored > 0 {
                     report.books_downloaded += 1;
                     report.chapters_downloaded += unpacked.chapters_restored;
                 }
             }
 
-            // Step 3: Push local books whose packed digest differs from Google Drive
+            // Re-merge remote bundle after unpacking archives so bookmarks, highlights & progress attach to unpacked books
+            if report.books_downloaded > 0 {
+                if let Some(ref remote_bundle) = remote_bundle_opt {
+                    let _ = db.merge_bundle(remote_bundle, false);
+                }
+            }
+
+            // Step 3: Push local downloaded books into `<folder>/downloads/`
             let updated_novels = db.list_all_novels()?;
             for novel in &updated_novels {
                 let chs = db.get_chapters(&novel.id)?;
-                let Some((zip_bytes, local_digest, _packed_n)) =
+                let Some((zip_bytes, local_digest, packed_n)) =
                     pack_novel_archive(novel, &chs, &download_dir)?
                 else {
                     continue;
                 };
 
+                let _ = db.ensure_novel_in_library(&novel.id);
+
                 let archive_name = novel_archive_filename(&novel.id);
-                let existing = remote_by_novel_id
+                let existing = downloads_by_novel_id
                     .get(&novel.id)
-                    .or_else(|| remote_by_name.get(&archive_name));
+                    .or_else(|| downloads_by_name.get(&archive_name));
                 let remote_digest = existing.and_then(|f| {
                     f.app_properties
                         .as_ref()
@@ -1174,18 +1636,24 @@ impl GoogleDriveSyncCoordinator {
                 }
 
                 let props = serde_json::json!({
-                    "noveliumNovelId": novel.id,
+                    "noveliumNovelId": truncate_drive_prop(&novel.id, 95),
+                    "noveliumTitle": truncate_drive_prop(&novel.title, 85),
+                    "noveliumAuthor": truncate_drive_prop(&novel.author, 85),
+                    "noveliumChapters": packed_n.to_string(),
                     "noveliumDigest": local_digest,
                     "noveliumUpdatedAt": Utc::now().to_rfc3339(),
                 });
-                let desc = format!("Novelium offline book package: {}", novel.title);
+                let desc = format!(
+                    "Novelium offline book package: {} — by {}",
+                    novel.title, novel.author
+                );
                 upload_or_update_drive_file(
                     &self.http,
                     &mut cfg,
                     db,
                     DriveUploadSpec {
                         existing_file_id: existing.map(|f| f.id.as_str()),
-                        parent_id: &books_folder_id,
+                        parent_id: &downloads_folder_id,
                         filename: &archive_name,
                         mime_type: "application/zip",
                         description: Some(&desc),

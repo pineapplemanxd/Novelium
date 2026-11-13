@@ -2,8 +2,8 @@ use tauri::{AppHandle, State};
 
 use crate::error::AppResult;
 use crate::models::{
-    GoogleDriveOAuthStartResult, GoogleDriveSyncConfigPatch, GoogleDriveSyncReport,
-    GoogleDriveSyncStatus,
+    GoogleDriveCloudBook, GoogleDriveOAuthStartResult, GoogleDriveSyncConfigPatch,
+    GoogleDriveSyncReport, GoogleDriveSyncStatus,
 };
 use crate::state::AppState;
 use crate::sync::{parse_google_drive_folder_id, GoogleDriveSyncCoordinator};
@@ -137,6 +137,42 @@ pub async fn sync_with_gdrive(
             report.books_downloaded,
             report.chapters_downloaded,
             report.books_uploaded
+        ))
+        .await;
+    Ok(report)
+}
+
+#[tauri::command]
+pub async fn list_gdrive_cloud_books(
+    state: State<'_, AppState>,
+) -> AppResult<Vec<GoogleDriveCloudBook>> {
+    state
+        .gdrive
+        .list_cloud_books(&state.db, &state.downloads)
+        .await
+}
+
+#[tauri::command]
+pub async fn download_gdrive_book_to_device(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    file_id: String,
+    novel_id: Option<String>,
+) -> AppResult<GoogleDriveSyncReport> {
+    let report = state
+        .gdrive
+        .download_cloud_book_to_device(
+            &state.db,
+            &state.downloads,
+            &file_id,
+            novel_id.as_deref(),
+            Some(&app),
+        )
+        .await?;
+    state
+        .log_event(format!(
+            "Downloaded cloud book from Google Drive ({} ch restored)",
+            report.chapters_downloaded
         ))
         .await;
     Ok(report)

@@ -713,3 +713,18 @@ pub struct GoogleDriveSyncReport {
     pub settings_applied: bool,
     pub synced_at: String,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GoogleDriveCloudBook {
+    pub file_id: String,
+    pub filename: String,
+    pub folder_name: String,
+    pub novel_id: String,
+    pub title: String,
+    pub author: String,
+    pub chapter_count: usize,
+    pub size_bytes: u64,
+    pub updated_at: Option<String>,
+    pub is_downloaded_locally: bool,
+}
+

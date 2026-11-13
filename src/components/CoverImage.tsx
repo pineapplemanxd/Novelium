@@ -2,7 +2,6 @@ import React, { useEffect, useState } from "react";
 import { api, isTauriEnv, resolveCoverSrc } from "../api/tauri";
 
 const coverDiskCache = new Map<string, string>();
-const coverInflight = new Map<string, Promise<string | null>>();
 
 function getCachedLocalSrc(coverUrl: string): string | null {
   const localPath = coverDiskCache.get(coverUrl);
@@ -59,29 +58,6 @@ export const CoverImage: React.FC<CoverImageProps> = ({
     const localKnown =
       !localCoverPath && coverUrl ? getCachedLocalSrc(coverUrl) : null;
     setSrc(localKnown ?? resolveCoverSrc(coverUrl, localCoverPath));
-
-    if (
-      isTauriEnv() &&
-      coverUrl &&
-      !localCoverPath &&
-      !coverDiskCache.has(coverUrl) &&
-      (coverUrl.startsWith("http://") || coverUrl.startsWith("https://"))
-    ) {
-      let pending = coverInflight.get(coverUrl);
-      if (!pending) {
-        pending = api
-          .cacheCoverImage(coverUrl, novelId)
-          .then((path) => {
-            if (path) coverDiskCache.set(coverUrl, path);
-            return path;
-          })
-          .catch(() => null)
-          .finally(() => {
-            coverInflight.delete(coverUrl);
-          });
-        coverInflight.set(coverUrl, pending);
-      }
-    }
   }, [coverUrl, localCoverPath, novelId]);
 
   const handleImgError = async () => {

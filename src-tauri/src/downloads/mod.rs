@@ -290,6 +290,7 @@ impl DownloadManager {
             updated_at: now,
         };
 
+        let _ = self.db.ensure_novel_in_library(&novel.id);
         self.db.insert_download_task(&task)?;
         self.spawn_task_worker(task.clone()).await;
         Ok(task)

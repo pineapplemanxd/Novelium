@@ -77,49 +77,42 @@ export const HomePage: React.FC<HomePageProps> = ({
         Array.from(genreCounts.entries()).sort((a, b) => b[1] - a[1])[0]?.[0] ||
         "Science Fiction";
 
-      const [trendRes, popRes, recRes] = await Promise.all([
-        api.discoverNovels({
-          source_id: null,
-          query: null,
-          genre: null,
-          sort: "trending",
-          status: null,
-          page: 1,
-          limit: 10,
-        }),
-        api.discoverNovels({
-          source_id: null,
-          query: null,
-          genre: null,
-          sort: "latest",
-          status: null,
-          page: 1,
-          limit: 10,
-        }),
-        api.discoverNovels({
-          source_id: null,
-          query: null,
-          genre: topGenre,
-          sort: "popular",
-          status: null,
-          page: 1,
-          limit: 10,
-        }),
-      ]);
+      const feedRes = await api.discoverNovels({
+        source_id: null,
+        query: null,
+        genre: null,
+        sort: "popular",
+        status: null,
+        page: 1,
+        limit: 24,
+      });
+
+      const allItems = feedRes.items;
+      const trending = allItems.slice(0, 10);
+      const popular = allItems.length > 10 ? allItems.slice(10, 20) : allItems.slice(0, 10);
+      const genreMatches = allItems.filter((item) =>
+        item.genres.some((g) => g.toLowerCase().includes(topGenre.toLowerCase())),
+      );
+      const recommended =
+        genreMatches.length >= 4
+          ? genreMatches.slice(0, 10)
+          : allItems.length > 16
+            ? allItems.slice(14, 24)
+            : allItems.slice(0, 10);
 
       onUpdateFeedCache({
-        trending: trendRes.items.slice(0, 10),
-        popular: popRes.items.slice(0, 10),
-        recommended: recRes.items.slice(0, 10),
+        trending,
+        popular,
+        recommended,
         recommendedGenre: topGenre,
         fetchedAt: Date.now(),
       });
 
       if (
-        trendRes.items.length === 0 &&
-        trendRes.source_errors.length > 0
+        feedRes.items.length === 0 &&
+        feedRes.source_errors.length > 0
       ) {
-        setFeedError(trendRes.source_errors.map((s) => `${s.source_name}: ${s.message}`).join(" · "));
+        setFeedError(feedRes.source_errors.map((s) => `${s.source_name}: ${s.message}`).join(" · "));
       }
     } catch (e) {
       setFeedError(extractErrorMessage(e));

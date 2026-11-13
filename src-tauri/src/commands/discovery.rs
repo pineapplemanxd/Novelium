@@ -1,4 +1,7 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
 use futures::future::join_all;
 use tauri::State;
 
@@ -9,6 +12,27 @@ use crate::models::{
     NovelDetailsResponse, NovelRecord, NovelSummary, NovelTranslation, SourceErrorBanner,
 };
 use crate::state::AppState;
+
+const DISCOVERY_CACHE_TTL: Duration = Duration::from_secs(600);
+
+fn discovery_cache() -> &'static Mutex<HashMap<String, (Instant, DiscoveryPage)>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, (Instant, DiscoveryPage)>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn make_discovery_cache_key(active_ids: &[String], q: &DiscoveryQuery) -> String {
+    format!(
+        "srcs={}|q={}|g={}|sort={}|st={}|lang={}|p={}|l={}",
+        active_ids.join(","),
+        q.query.as_deref().unwrap_or("").trim().to_lowercase(),
+        q.genre.as_deref().unwrap_or("").trim().to_lowercase(),
+        q.sort.as_deref().unwrap_or("popular").trim().to_lowercase(),
+        q.status.as_deref().unwrap_or("all").trim().to_lowercase(),
+        q.language.as_deref().unwrap_or("all").trim().to_lowercase(),
+        q.page,
+        q.limit
+    )
+}
 
 #[tauri::command]
 pub async fn discover_novels(
@@ -34,12 +58,41 @@ pub async fn discover_novels(
         });
     }
 
+    let active_ids: Vec<String> = active.iter().map(|(s, _)| s.id().to_string()).collect();
+    let cache_key = make_discovery_cache_key(&active_ids, &query);
+    if let Ok(guard) = discovery_cache().lock() {
+        if let Some((fetched_at, cached_page)) = guard.get(&cache_key) {
+            if fetched_at.elapsed() < DISCOVERY_CACHE_TTL && !cached_page.items.is_empty() {
+                return Ok(cached_page.clone());
+            }
+        }
+    }
+
+    let is_multi_source = active.len() > 1;
+    let per_source_timeout = if is_multi_source {
+        Duration::from_millis(3500)
+    } else {
+        Duration::from_millis(9000)
+    };
+
+    // Cap per-source limit when querying many sources at once so each source does minimal work
+    let mut sub_query = query.clone();
+    if is_multi_source {
+        sub_query.limit = query.limit.clamp(6, 12);
+    }
+
     let futures = active.into_iter().map(|(src, cfg)| {
-        let q = query.clone();
+        let q = sub_query.clone();
         async move {
             let sid = src.id().to_string();
             let sname = src.name().to_string();
-            let res = src.discover(&q, &cfg).await;
+            let res = match tokio::time::timeout(per_source_timeout, src.discover(&q, &cfg)).await {
+                Ok(inner) => inner,
+                Err(_) => Err(AppError::Source {
+                    source_id: sid.clone(),
+                    message: format!("Timed out after {}ms", per_source_timeout.as_millis()),
+                }),
+            };
             (sid, sname, res)
         }
     });
@@ -48,7 +101,7 @@ pub async fn discover_novels(
     let mut all_items: Vec<NovelSummary> = Vec::new();
     let mut any_more = false;
     let mut total_est: Option<u64> = None;
-    let mut source_errors = Vec::new();
+    let mut raw_errors = Vec::new();
 
     for (sid, sname, res) in results {
         match res {
@@ -65,7 +118,7 @@ pub async fn discover_novels(
             Err(e) => {
                 let _ = state.db.update_source_health(&sid, "degraded");
                 tracing::warn!("Source '{}' discovery error: {}", sid, e);
-                source_errors.push(SourceErrorBanner {
+                raw_errors.push(SourceErrorBanner {
                     source_id: sid,
                     source_name: sname,
                     message: e.to_string(),
@@ -73,6 +126,13 @@ pub async fn discover_novels(
             }
         }
     }
+
+    // In multi-source ("All Sources") mode, don't spam error banners for slow sources if other sources returned results
+    let source_errors = if is_multi_source && !all_items.is_empty() {
+        Vec::new()
+    } else {
+        raw_errors
+    };
 
     if let Some(req_lang) = query
         .language
@@ -107,13 +167,24 @@ pub async fn discover_novels(
         _ => all_items.sort_by(|a, b| b.popularity.cmp(&a.popularity)),
     }
 
-    Ok(DiscoveryPage {
+    let page_out = DiscoveryPage {
         items: all_items,
         page: query.page,
         has_more: any_more,
         total_estimate: total_est,
         source_errors,
-    })
+    };
+
+    if !page_out.items.is_empty() {
+        if let Ok(mut guard) = discovery_cache().lock() {
+            if guard.len() > 120 {
+                guard.clear();
+            }
+            guard.insert(cache_key, (Instant::now(), page_out.clone()));
+        }
+    }
+
+    Ok(page_out)
 }
 
 #[tauri::command]
@@ -157,32 +228,60 @@ pub async fn get_novel_details(
                 .map(|i| i.config)
                 .unwrap_or_default();
 
-            if novel.is_none() || chapters.is_empty() || should_refresh || missing_author {
-                match src.get_novel(&external_id, &cfg).await {
-                    Ok(remote_novel) => {
+            let need_novel = novel.is_none() || chapters.is_empty() || should_refresh || missing_author;
+            let need_chapters = chapters.is_empty() || should_refresh;
+
+            if need_novel && need_chapters {
+                let (novel_res, ch_res) = tokio::join!(
+                    tokio::time::timeout(Duration::from_secs(10), src.get_novel(&external_id, &cfg)),
+                    tokio::time::timeout(Duration::from_secs(12), src.get_chapters(&external_id, &cfg))
+                );
+                match novel_res {
+                    Ok(Ok(remote_novel)) => {
                         novel = Some(state.db.upsert_novel(&remote_novel)?);
                     }
-                    Err(e) => {
+                    Ok(Err(e)) => {
                         if novel.is_none() {
                             return Err(e);
                         }
                         tracing::warn!("Could not refresh remote novel metadata: {}", e);
                     }
+                    Err(_) => {
+                        if novel.is_none() {
+                            return Err(AppError::Source {
+                                source_id: source_id.clone(),
+                                message: "Timed out loading novel details".into(),
+                            });
+                        }
+                    }
                 }
-            }
-
-            if chapters.is_empty() || should_refresh {
-                match src.get_chapters(&external_id, &cfg).await {
-                    Ok(remote_chapters) if !remote_chapters.is_empty() => {
+                match ch_res {
+                    Ok(Ok(remote_chapters)) if !remote_chapters.is_empty() => {
                         state.db.upsert_chapters(&novel_id, &remote_chapters)?;
                         chapters = state.db.get_chapters(&novel_id)?;
                     }
-                    Ok(_) => {}
-                    Err(e) => {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(e)) => {
                         if chapters.is_empty() {
                             return Err(e);
                         }
                         tracing::warn!("Could not refresh chapters for {}: {}", novel_id, e);
+                    }
+                    Err(_) => {}
+                }
+            } else if need_novel {
+                if let Ok(Ok(remote_novel)) =
+                    tokio::time::timeout(Duration::from_secs(10), src.get_novel(&external_id, &cfg)).await
+                {
+                    novel = Some(state.db.upsert_novel(&remote_novel)?);
+                }
+            } else if need_chapters {
+                if let Ok(Ok(remote_chapters)) =
+                    tokio::time::timeout(Duration::from_secs(12), src.get_chapters(&external_id, &cfg)).await
+                {
+                    if !remote_chapters.is_empty() {
+                        state.db.upsert_chapters(&novel_id, &remote_chapters)?;
+                        chapters = state.db.get_chapters(&novel_id)?;
                     }
                 }
             }

@@ -1,7 +1,10 @@
 import React, { useEffect, useState } from "react";
 import {
+  CheckCircle2,
+  Cloud,
   Download,
   HardDrive,
+  Loader2,
   Pause,
   Play,
   RefreshCw,
@@ -12,7 +15,7 @@ import {
 } from "lucide-react";
 import { api, extractErrorMessage } from "../api/tauri";
 import { CoverImage } from "../components/CoverImage";
-import type { DownloadTask, StorageStats } from "../types/novel";
+import type { DownloadTask, GoogleDriveCloudBook, StorageStats } from "../types/novel";
 import { formatBytes, formatRelativeDate, formatSpeed } from "../utils/format";
 import { importBookFilesFromPicker } from "../utils/importBooks";
 
@@ -27,8 +30,29 @@ export const DownloadsPage: React.FC<DownloadsPageProps> = ({
 }) => {
   const [tasks, setTasks] = useState<DownloadTask[]>([]);
   const [storage, setStorage] = useState<StorageStats | null>(null);
+  const [cloudBooks, setCloudBooks] = useState<GoogleDriveCloudBook[]>([]);
+  const [cloudConnected, setCloudConnected] = useState(false);
+  const [loadingCloud, setLoadingCloud] = useState(false);
+  const [downloadingCloudId, setDownloadingCloudId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [importing, setImporting] = useState(false);
+
+  const loadCloud = async () => {
+    try {
+      const st = await api.getGdriveSyncStatus();
+      const connected = Boolean(st.connected && st.folder_id);
+      setCloudConnected(connected);
+      if (connected) {
+        setLoadingCloud(true);
+        const books = await api.listGdriveCloudBooks();
+        setCloudBooks(books);
+      }
+    } catch {
+      // ignore if cloud not configured
+    } finally {
+      setLoadingCloud(false);
+    }
+  };
 
   const loadAll = async () => {
     setLoading(true);
@@ -36,10 +60,26 @@ export const DownloadsPage: React.FC<DownloadsPageProps> = ({
       const [t, s] = await Promise.all([api.listDownloads(), api.getStorageStats()]);
       setTasks(t);
       setStorage(s);
+      loadCloud();
     } catch (e) {
       onNotify(extractErrorMessage(e), true);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleDownloadFromGdrive = async (book: GoogleDriveCloudBook) => {
+    setDownloadingCloudId(book.file_id);
+    try {
+      const report = await api.downloadGdriveBookToDevice(book.file_id, book.novel_id);
+      onNotify(
+        `Downloaded "${book.title}" to device (${report.chapters_downloaded} chapters)`,
+      );
+      await loadAll();
+    } catch (e) {
+      onNotify(extractErrorMessage(e), true);
+    } finally {
+      setDownloadingCloudId(null);
     }
   };
 
@@ -375,6 +415,88 @@ export const DownloadsPage: React.FC<DownloadsPageProps> = ({
           </div>
         )}
       </section>
+      {/* Google Drive Cloud Downloads */}
+      {cloudConnected && (
+        <section className="space-y-3">
+          <div className="flex items-center justify-between gap-2">
+            <h2 className="text-base font-semibold flex items-center gap-2">
+              <Cloud className="w-4 h-4 text-[var(--accent-hover)]" />
+              Google Drive Cloud Books ({cloudBooks.length})
+            </h2>
+            <button
+              type="button"
+              onClick={loadCloud}
+              disabled={loadingCloud}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium border border-[var(--border-subtle)] bg-[var(--bg-surface)] hover:bg-[var(--bg-elevated)] disabled:opacity-50"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${loadingCloud ? "animate-spin" : ""}`} />
+              Refresh Cloud
+            </button>
+          </div>
+          {loadingCloud && cloudBooks.length === 0 ? (
+            <div className="p-6 text-center rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-xs text-[var(--text-muted)] flex items-center justify-center gap-2">
+              <Loader2 className="w-4 h-4 animate-spin" />
+              Loading books from Google Drive <code>downloads/</code>…
+            </div>
+          ) : cloudBooks.length === 0 ? (
+            <div className="p-6 text-center rounded-xl border border-dashed border-[var(--border-strong)] text-xs text-[var(--text-muted)]">
+              No downloaded books in Google Drive <code>downloads/</code> yet. Sync in Settings to upload your offline books.
+            </div>
+          ) : (
+            <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] divide-y divide-[var(--border-subtle)] overflow-hidden">
+              {cloudBooks.map((cb) => {
+                const busy = downloadingCloudId === cb.file_id;
+                return (
+                  <div
+                    key={cb.file_id}
+                    className="px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3 hover:bg-[var(--bg-hover)]"
+                  >
+                    <div className="min-w-0">
+                      <button
+                        type="button"
+                        onClick={() => cb.is_downloaded_locally && onOpenNovel(cb.novel_id)}
+                        className="text-sm font-medium truncate hover:text-[var(--accent-hover)] block text-left"
+                      >
+                        {cb.title}
+                      </button>
+                      <div className="text-xs text-[var(--text-muted)] flex flex-wrap items-center gap-1.5 mt-0.5">
+                        <span>{cb.author}</span>
+                        {cb.chapter_count > 0 && <span>· {cb.chapter_count} chapters</span>}
+                        {cb.size_bytes > 0 && <span>· {formatBytes(cb.size_bytes)}</span>}
+                        <span className="px-1.5 py-0.2 rounded bg-[var(--bg-elevated)] border border-[var(--border-subtle)] font-mono text-[10px]">
+                          {cb.folder_name}/
+                        </span>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      {cb.is_downloaded_locally && (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium border border-emerald-500/30 bg-emerald-500/10 text-emerald-300">
+                          <CheckCircle2 className="w-3 h-3" />
+                          On Device
+                        </span>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => handleDownloadFromGdrive(cb)}
+                        disabled={busy}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-white disabled:opacity-50"
+                        style={{ backgroundColor: "var(--accent)" }}
+                      >
+                        {busy ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <Download className="w-3.5 h-3.5" />
+                        )}
+                        {cb.is_downloaded_locally ? "Re-download" : "Download to Device"}
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </section>
+      )}
     </div>
   );
 };

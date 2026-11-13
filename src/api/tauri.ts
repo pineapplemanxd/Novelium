@@ -13,6 +13,7 @@ import type {
   DiscoveryPage,
   DiscoveryQuery,
   DownloadTask,
+  GoogleDriveCloudBook,
   GoogleDriveOAuthStartResult,
   GoogleDriveSyncConfigPatch,
   GoogleDriveSyncReport,
@@ -286,6 +287,13 @@ export const api = {
     invoke<GoogleDriveSyncStatus>("verify_gdrive_folder"),
   syncWithGdrive: () =>
     invoke<GoogleDriveSyncReport>("sync_with_gdrive"),
+  listGdriveCloudBooks: () =>
+    invoke<GoogleDriveCloudBook[]>("list_gdrive_cloud_books"),
+  downloadGdriveBookToDevice: (fileId: string, novelId?: string | null) =>
+    invoke<GoogleDriveSyncReport>("download_gdrive_book_to_device", {
+      fileId,
+      novelId: novelId ?? null,
+    }),
 
   // Events & Native Window/Dialogs
   onGdriveSyncUpdated: (cb: (status: GoogleDriveSyncStatus) => void): Promise<UnlistenFn> => {

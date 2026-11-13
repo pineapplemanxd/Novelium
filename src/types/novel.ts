@@ -432,3 +432,17 @@ export interface GoogleDriveSyncReport {
   settings_applied: boolean;
   synced_at: string;
 }
+
+export interface GoogleDriveCloudBook {
+  file_id: string;
+  filename: string;
+  folder_name: string;
+  novel_id: string;
+  title: string;
+  author: string;
+  chapter_count: number;
+  size_bytes: number;
+  updated_at: string | null;
+  is_downloaded_locally: boolean;
+}
+
