@@ -748,6 +748,7 @@ mod tests {
             chapter_link_selector: None,
             content_selector: Some("#c".into()),
             remove_selectors: vec![],
+            language: None,
         };
         registry.install_custom_source(&db, manifest).await.unwrap();
 
@@ -925,6 +926,7 @@ mod tests {
             chapter_link_selector: None,
             content_selector: Some("#c".into()),
             remove_selectors: vec![],
+            language: None,
         };
         registry.install_custom_source(&db, manifest).await.unwrap();
 

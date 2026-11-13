@@ -62,6 +62,8 @@ pub struct DeclarativeSourceManifest {
     pub content_selector: Option<String>,
     #[serde(default)]
     pub remove_selectors: Vec<String>,
+    #[serde(default)]
+    pub language: Option<String>,
 }
 
 pub struct DeclarativeSource {
@@ -234,6 +236,7 @@ impl DeclarativeSource {
                     popularity: 0,
                     chapter_count: None,
                     last_updated: None,
+                    language: None,
                 });
             }
         }
@@ -328,6 +331,7 @@ impl DeclarativeSource {
                 popularity: 0,
                 chapter_count: None,
                 last_updated: None,
+                language: self.manifest.language.clone(),
             });
         }
         Ok(out)
@@ -406,6 +410,20 @@ impl NovelSource for DeclarativeSource {
         query: &DiscoveryQuery,
         _config: &HashMap<String, Value>,
     ) -> AppResult<(Vec<NovelSummary>, bool, Option<u64>)> {
+        if let Some(req_lang) = query
+            .language
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("all"))
+        {
+            if let Some(ref src_lang) = self.manifest.language {
+                if !src_lang.eq_ignore_ascii_case(req_lang) {
+                    return Ok((Vec::new(), false, None));
+                }
+            } else {
+                return Ok((Vec::new(), false, None));
+            }
+        }
         let trimmed_q = query.query.as_deref().map(str::trim).filter(|s| !s.is_empty());
         let (target_url, used_tpl) = if trimmed_q.is_some() {
             if let Some(tpl) = &self.manifest.search_url_template {
@@ -496,7 +514,12 @@ impl NovelSource for DeclarativeSource {
                     popularity: 0,
                     chapter_count: parsed.chapters.len() as i64,
                     last_updated_remote: None,
-                    metadata: serde_json::json!({}),
+                    metadata: self
+                        .manifest
+                        .language
+                        .as_deref()
+                        .map(|lang| serde_json::json!({ "language": lang }))
+                        .unwrap_or_else(|| serde_json::json!({})),
                     is_local: false,
                     created_at: now.clone(),
                     updated_at: now,
@@ -556,7 +579,12 @@ impl NovelSource for DeclarativeSource {
                     popularity: 0,
                     chapter_count: 0,
                     last_updated_remote: None,
-                    metadata: serde_json::json!({}),
+                    metadata: self
+                        .manifest
+                        .language
+                        .as_deref()
+                        .map(|lang| serde_json::json!({ "language": lang }))
+                        .unwrap_or_else(|| serde_json::json!({})),
                     is_local: false,
                     created_at: now.clone(),
                     updated_at: now,
@@ -655,6 +683,25 @@ impl NovelSource for DeclarativeSource {
                         size_bytes: 0,
                     });
                 }
+                if chapters.len() >= 2 {
+                    let first_num = extract_chapter_order_num(
+                        &chapters[0].title,
+                        chapters[0].url.as_deref().unwrap_or(""),
+                    );
+                    let last = chapters.len() - 1;
+                    let last_num = extract_chapter_order_num(
+                        &chapters[last].title,
+                        chapters[last].url.as_deref().unwrap_or(""),
+                    );
+                    if let (Some(a), Some(b)) = (first_num, last_num) {
+                        if a > b {
+                            chapters.reverse();
+                            for (idx, ch) in chapters.iter_mut().enumerate() {
+                                ch.chapter_number = (idx + 1) as f64;
+                            }
+                        }
+                    }
+                }
                 Ok(chapters)
             }
         }
@@ -718,6 +765,27 @@ impl NovelSource for DeclarativeSource {
             .replace("{genre}", "");
         self.http.probe_latency(&probe).await
     }
+}
+
+fn extract_chapter_order_num(title: &str, url: &str) -> Option<f64> {
+    let parse_after_kw = |s: &str| -> Option<f64> {
+        let lower = s.to_ascii_lowercase();
+        for kw in ["chapter", "chap", "ch-", "ch ", "bab"] {
+            if let Some(pos) = lower.find(kw) {
+                let tail = &lower[pos + kw.len()..];
+                let digits: String = tail
+                    .chars()
+                    .skip_while(|c| !c.is_ascii_digit())
+                    .take_while(|c| c.is_ascii_digit() || *c == '.')
+                    .collect();
+                if let Ok(n) = digits.trim_matches('.').parse::<f64>() {
+                    return Some(n);
+                }
+            }
+        }
+        None
+    };
+    parse_after_kw(title).or_else(|| parse_after_kw(url))
 }
 
 #[cfg(test)]
@@ -817,6 +885,7 @@ mod tests {
             chapter_link_selector: None,
             content_selector: Some("#prose".into()),
             remove_selectors: vec![".ads".into()],
+            language: Some("en".into()),
         };
 
         let tmp = tempfile::tempdir().unwrap();
@@ -833,6 +902,7 @@ mod tests {
                     genre: None,
                     sort: None,
                     status: None,
+                    language: None,
                     page: 1,
                     limit: 20,
                 },
@@ -954,6 +1024,7 @@ mod tests {
             chapter_link_selector: None,
             content_selector: None,
             remove_selectors: vec![],
+            language: None,
         };
 
         let tmp = tempfile::tempdir().unwrap();
@@ -969,6 +1040,7 @@ mod tests {
                     genre: None,
                     sort: None,
                     status: None,
+                    language: None,
                     page: 1,
                     limit: 20,
                 },
@@ -1045,9 +1117,9 @@ mod tests {
                             r#"<html><body>
                                 <h1 class="novel-title">Sky Sword</h1>
                                 <ul class="chapter-list">
-                                    <li><a href="/ch/1">Ch 1</a></li>
-                                    <li><a href="/ch/1">Ch 1</a></li>
-                                    <li><a href="/ch/2">Ch 2</a></li>
+                                    <li><a href="/ch/2">Chapter 2</a></li>
+                                    <li><a href="/ch/2">Chapter 2</a></li>
+                                    <li><a href="/ch/1">Chapter 1</a></li>
                                 </ul>
                             </body></html>"#.to_string(),
                         )
@@ -1084,6 +1156,7 @@ mod tests {
             chapter_link_selector: None,
             content_selector: Some(".chapter-content".into()),
             remove_selectors: vec![],
+            language: Some("en".into()),
         };
 
         let tmp = tempfile::tempdir().unwrap();
@@ -1101,6 +1174,7 @@ mod tests {
                     genre: None,
                     sort: None,
                     status: None,
+                    language: Some("en".into()),
                     page: 1,
                     limit: 20,
                 },
@@ -1110,13 +1184,34 @@ mod tests {
             .unwrap();
         assert!(has_more);
         assert_eq!(items.len(), 1);
+        assert_eq!(items[0].language.as_deref(), Some("en"));
         assert_eq!(
             items[0].cover_url.as_deref(),
             Some(format!("{base}/covers/sky.jpg").as_str())
         );
 
+        let (pl_items, _, _) = src
+            .discover(
+                &DiscoveryQuery {
+                    source_id: None,
+                    query: None,
+                    genre: None,
+                    sort: None,
+                    status: None,
+                    language: Some("pl".into()),
+                    page: 1,
+                    limit: 20,
+                },
+                &HashMap::new(),
+            )
+            .await
+            .unwrap();
+        assert!(pl_items.is_empty());
+
         let chapters = src.get_chapters(&items[0].external_id, &HashMap::new()).await.unwrap();
         assert_eq!(chapters.len(), 2);
+        assert_eq!(chapters[0].title, "Chapter 1");
+        assert_eq!(chapters[1].title, "Chapter 2");
         assert_eq!(chapters[1].chapter_number, 2.0);
         server_handle.abort();
     }

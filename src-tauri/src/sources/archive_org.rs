@@ -144,6 +144,8 @@ struct IaDoc {
     #[serde(default)]
     subject: Option<Value>,
     #[serde(default)]
+    language: Option<Value>,
+    #[serde(default)]
     downloads: Option<i64>,
     #[serde(default)]
     date: Option<String>,
@@ -222,6 +224,62 @@ fn val_to_vec(v: Option<&Value>) -> Vec<String> {
     }
 }
 
+fn normalize_ia_lang_str(raw: &str) -> Option<String> {
+    let first = raw
+        .split([',', ';'])
+        .next()
+        .map(str::trim)
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if first.is_empty() {
+        return None;
+    }
+    let code = match first.as_str() {
+        "eng" | "english" | "en" => "en",
+        "pol" | "polish" | "polski" | "pl" => "pl",
+        "fre" | "fra" | "french" | "français" | "fr" => "fr",
+        "ger" | "deu" | "german" | "deutsch" | "de" => "de",
+        "spa" | "spanish" | "español" | "es" => "es",
+        "ita" | "italian" | "italiano" | "it" => "it",
+        "por" | "portuguese" | "português" | "pt" => "pt",
+        "rus" | "russian" | "ru" => "ru",
+        "jpn" | "japanese" | "ja" => "ja",
+        "chi" | "zho" | "chinese" | "zh" => "zh",
+        "ind" | "indonesian" | "id" => "id",
+        other if other.len() == 2 => other,
+        _ => return Some(first),
+    };
+    Some(code.to_string())
+}
+
+fn normalize_ia_lang_val(v: Option<&Value>) -> Option<String> {
+    let s = val_to_string(v);
+    normalize_ia_lang_str(&s)
+}
+
+fn ia_language_clause(code: &str) -> String {
+    match code.trim().to_ascii_lowercase().as_str() {
+        "en" => "(language:eng OR language:English OR language:en)".into(),
+        "pl" => "(language:pol OR language:Polish OR language:pl)".into(),
+        "fr" => "(language:fre OR language:fra OR language:French OR language:fr)".into(),
+        "de" => "(language:ger OR language:deu OR language:German OR language:de)".into(),
+        "es" => "(language:spa OR language:Spanish OR language:es)".into(),
+        "it" => "(language:ita OR language:Italian OR language:it)".into(),
+        "pt" => "(language:por OR language:Portuguese OR language:pt)".into(),
+        "ru" => "(language:rus OR language:Russian OR language:ru)".into(),
+        "ja" => "(language:jpn OR language:Japanese OR language:ja)".into(),
+        "zh" => "(language:chi OR language:zho OR language:Chinese OR language:zh)".into(),
+        "id" => "(language:ind OR language:Indonesian OR language:id)".into(),
+        other => {
+            let safe: String = other
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+                .collect();
+            format!("language:({safe})")
+        }
+    }
+}
+
 #[async_trait]
 impl NovelSource for ArchiveOrgSource {
     fn id(&self) -> &str {
@@ -293,6 +351,15 @@ impl NovelSource for ArchiveOrgSource {
         } else if query.query.as_deref().map(str::trim).unwrap_or("").is_empty() {
             q_parts.push("subject:(\"fiction\")".to_string());
         }
+        let req_lang = query
+            .language
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("all"))
+            .map(str::to_ascii_lowercase);
+        if let Some(ref lang_code) = req_lang {
+            q_parts.push(ia_language_clause(lang_code));
+        }
 
         let sort = match query.sort.as_deref() {
             Some("latest") => "addeddate desc",
@@ -310,6 +377,7 @@ impl NovelSource for ArchiveOrgSource {
             .append_pair("fl[]", "creator")
             .append_pair("fl[]", "description")
             .append_pair("fl[]", "subject")
+            .append_pair("fl[]", "language")
             .append_pair("fl[]", "downloads")
             .append_pair("fl[]", "date")
             .append_pair("sort[]", sort)
@@ -344,6 +412,8 @@ impl NovelSource for ArchiveOrgSource {
                 };
                 let desc = val_to_string(doc.description.as_ref());
                 let genres = val_to_vec(doc.subject.as_ref());
+                let lang = normalize_ia_lang_val(doc.language.as_ref())
+                    .or_else(|| req_lang.clone());
 
                 NovelSummary {
                     id: make_novel_id(self.id(), &doc.identifier),
@@ -364,6 +434,7 @@ impl NovelSource for ArchiveOrgSource {
                     popularity: doc.downloads.unwrap_or(0),
                     chapter_count: None,
                     last_updated: doc.date,
+                    language: lang,
                 }
             })
             .collect();
@@ -412,7 +483,7 @@ impl NovelSource for ArchiveOrgSource {
             last_updated_remote: dm.and_then(|m| m.date.clone()),
             metadata: serde_json::json!({
                 "identifier": external_id,
-                "language": val_to_string(dm.and_then(|m| m.language.as_ref())),
+                "language": normalize_ia_lang_val(dm.and_then(|m| m.language.as_ref())).unwrap_or_default(),
             }),
             is_local: false,
             created_at: now.clone(),
@@ -517,6 +588,7 @@ mod tests {
                     query: Some("sherlock".into()),
                     genre: None,
                     status: None,
+                    language: None,
                     sort: Some("popular".into()),
                     page: 1,
                     limit: 5,

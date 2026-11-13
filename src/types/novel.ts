@@ -66,6 +66,7 @@ export interface DeclarativeSourceManifest {
   chapter_link_selector?: string;
   content_selector?: string;
   remove_selectors: string[];
+  language?: string;
 }
 
 export interface NovelSummary {
@@ -83,6 +84,7 @@ export interface NovelSummary {
   popularity: number;
   chapter_count: number | null;
   last_updated: string | null;
+  language?: string | null;
 }
 
 export interface NovelRecord {
@@ -276,6 +278,7 @@ export interface DiscoveryQuery {
   genre: string | null;
   sort: string | null;
   status: string | null;
+  language?: string | null;
   page: number;
   limit: number;
 }

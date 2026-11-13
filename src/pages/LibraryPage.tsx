@@ -16,7 +16,7 @@ import { api, extractErrorMessage } from "../api/tauri";
 import { CoverImage } from "../components/CoverImage";
 import { LibraryNovelCard } from "../components/NovelCard";
 import type { Collection, LibraryNovelItem, UpdateCheckResult } from "../types/novel";
-import { formatBytes, formatRelativeDate, libraryStatusLabel } from "../utils/format";
+import { APP_LANGUAGES, formatBytes, formatRelativeDate, languageLabel, libraryStatusLabel } from "../utils/format";
 
 interface LibraryPageProps {
   onOpenNovel: (novelId: string) => void;
@@ -43,6 +43,7 @@ export const LibraryPage: React.FC<LibraryPageProps> = ({
   const [shelf, setShelf] = useState<ShelfFilter>("all");
   const [selectedCollection, setSelectedCollection] = useState<string | null>(null);
   const [search, setSearch] = useState("");
+  const [languageFilter, setLanguageFilter] = useState("all");
   const [sortBy, setSortBy] = useState<"last_read" | "title" | "progress" | "added" | "chapters">("last_read");
   const [viewMode, setViewMode] = useState<"grid" | "list">("grid");
   const [newCollectionName, setNewCollectionName] = useState("");
@@ -67,6 +68,17 @@ export const LibraryPage: React.FC<LibraryPageProps> = ({
     loadData();
   }, []);
 
+  const libraryLanguages = useMemo(() => {
+    const codes = new Set<string>(APP_LANGUAGES.map((l) => l.code));
+    for (const it of items) {
+      const raw = (it.novel.metadata as Record<string, unknown> | undefined)?.language;
+      if (typeof raw === "string" && raw.trim()) {
+        codes.add(raw.trim().toLowerCase().split("-")[0]);
+      }
+    }
+    return Array.from(codes);
+  }, [items]);
+
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     const list = items.filter((it) => {
@@ -79,6 +91,13 @@ export const LibraryPage: React.FC<LibraryPageProps> = ({
         if (shelf === "finished" && it.entry.status !== "finished") return false;
         if (shelf === "bookmarked" && !it.entry.is_bookmarked) return false;
         if (shelf === "downloaded" && it.downloaded_chapters === 0) return false;
+      }
+      if (languageFilter !== "all") {
+        const raw = (it.novel.metadata as Record<string, unknown> | undefined)?.language;
+        const lang = typeof raw === "string" ? raw.trim().toLowerCase() : "";
+        if (!lang || (lang !== languageFilter && !lang.startsWith(`${languageFilter}-`))) {
+          return false;
+        }
       }
       if (q) {
         const hit =
@@ -108,7 +127,7 @@ export const LibraryPage: React.FC<LibraryPageProps> = ({
       }
     });
     return list;
-  }, [items, shelf, selectedCollection, search, sortBy]);
+  }, [items, shelf, selectedCollection, languageFilter, search, sortBy]);
 
   const handleImportFiles = async () => {
     try {
@@ -255,6 +274,20 @@ export const LibraryPage: React.FC<LibraryPageProps> = ({
               className="pl-8 pr-3 py-1.5 w-48 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-xs focus:outline-none focus:border-[var(--accent)]"
             />
           </div>
+
+          <select
+            aria-label="Filter library by language"
+            value={languageFilter}
+            onChange={(e) => setLanguageFilter(e.target.value)}
+            className="px-2.5 py-1.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-xs focus:outline-none"
+          >
+            <option value="all">All Languages</option>
+            {libraryLanguages.map((code) => (
+              <option key={code} value={code}>
+                {languageLabel(code)}
+              </option>
+            ))}
+          </select>
 
           <select
             aria-label="Sort library"

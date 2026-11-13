@@ -328,7 +328,11 @@ impl Database {
             popularity: summary.popularity,
             chapter_count: summary.chapter_count.unwrap_or(0),
             last_updated_remote: summary.last_updated.clone(),
-            metadata: serde_json::json!({}),
+            metadata: summary
+                .language
+                .as_deref()
+                .map(|lang| serde_json::json!({ "language": lang }))
+                .unwrap_or_else(|| serde_json::json!({})),
             is_local: summary.source_id == "local",
             created_at: now.clone(),
             updated_at: now,

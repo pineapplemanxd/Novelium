@@ -113,6 +113,10 @@ export function sourceLabel(sourceId: string): string {
       return "NoBadNovel";
     case "wuxia_click":
       return "Wuxia.Click";
+    case "hiraeth":
+      return "Hiraeth Translation";
+    case "readnovelfull":
+      return "ReadNovelFull";
     case "local":
       return "Local Import";
     default:

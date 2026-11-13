@@ -33,6 +33,11 @@ export const NovelSummaryCard: React.FC<SummaryCardProps> = ({
           <span className="px-1.5 py-0.5 rounded-md text-[10px] font-medium bg-black/70 text-zinc-200 backdrop-blur-sm border border-white/10">
             {sourceLabel(novel.source_id)}
           </span>
+          {novel.language && (
+            <span className="px-1.5 py-0.5 rounded-md text-[10px] font-medium uppercase bg-black/70 text-zinc-200 backdrop-blur-sm border border-white/10">
+              {novel.language}
+            </span>
+          )}
         </div>
         {novel.status === "completed" && (
           <span className="absolute bottom-2 right-2 px-1.5 py-0.5 rounded text-[10px] font-medium bg-emerald-950/80 text-emerald-300 border border-emerald-500/30 backdrop-blur-sm">

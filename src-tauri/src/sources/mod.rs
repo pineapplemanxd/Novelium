@@ -183,6 +183,7 @@ struct HtmlPreset<'a> {
     chapter_list_selector: &'a str,
     content_selector: &'a str,
     remove_selectors: &'a [&'a str],
+    language: Option<&'a str>,
 }
 
 impl SourceRegistry {
@@ -212,6 +213,7 @@ impl SourceRegistry {
                 .iter()
                 .map(|s| (*s).to_string())
                 .collect(),
+            language: spec.language.map(str::to_string),
         };
         Arc::new(declarative::DeclarativeSource::new_builtin(
             manifest,
@@ -246,6 +248,7 @@ impl SourceRegistry {
                 chapter_list_selector: "ul.chapter-list li a",
                 content_selector: ".chapter-content",
                 remove_selectors: &["script", ".ads", "div[align='center']"],
+                language: Some("en"),
             }),
             self.html_preset(HtmlPreset {
                 id: "wuxiabox",
@@ -262,6 +265,7 @@ impl SourceRegistry {
                 chapter_list_selector: "ul.chapter-list li a",
                 content_selector: ".chapter-content",
                 remove_selectors: &["script", ".ads", "div[align='center']"],
+                language: Some("en"),
             }),
             self.html_preset(HtmlPreset {
                 id: "nobadnovel",
@@ -280,6 +284,7 @@ impl SourceRegistry {
                 chapter_list_selector: "#table a[href*='/chapter-']",
                 content_selector: "main div.grow, main article, main",
                 remove_selectors: &["script", "header", "nav"],
+                language: Some("en"),
             }),
             self.html_preset(HtmlPreset {
                 id: "wuxia_click",
@@ -296,6 +301,45 @@ impl SourceRegistry {
                 chapter_list_selector: "li a[href^='/chapter/']",
                 content_selector: "#chapter-content",
                 remove_selectors: &["script", ".ads"],
+                language: Some("en"),
+            }),
+            self.html_preset(HtmlPreset {
+                id: "hiraeth",
+                name: "Hiraeth Translation",
+                base_url: "https://hiraethtranslation.com",
+                description: "Translated web novels hosted on hiraethtranslation.com.",
+                browse_url_template: "https://hiraethtranslation.com/novel/page/{page}/",
+                search_url_template: Some(
+                    "https://hiraethtranslation.com/?s={query}&post_type=wp-manga",
+                ),
+                novel_list_selector: ".page-item-detail, .c-tabs-item__content",
+                title_selector: ".post-title h3 a, .post-title h4 a, .post-title a, .post-title h1",
+                author_selector: Some(".author-content a"),
+                link_selector: Some(".post-title a, .item-thumb a, .tab-thumb a"),
+                description_selector: Some(".summary__content"),
+                chapter_list_selector: "li.wp-manga-chapter a",
+                content_selector: ".reading-content .text-left, .reading-content",
+                remove_selectors: &["script", ".ads", ".code-block", ".chapter-warning", ".sharedaddy"],
+                language: Some("en"),
+            }),
+            self.html_preset(HtmlPreset {
+                id: "readnovelfull",
+                name: "ReadNovelFull",
+                base_url: "https://readnovelfull.com",
+                description: "Web novels and light novel translations hosted on readnovelfull.com.",
+                browse_url_template: "https://readnovelfull.com/novel-list/latest-release-novel?page={page}",
+                search_url_template: Some(
+                    "https://readnovelfull.com/novel-list/search?keyword={query}&page={page}",
+                ),
+                novel_list_selector: ".list-novel .row",
+                title_selector: "h3.novel-title a, h3.title",
+                author_selector: Some(".author, .info-meta a[href*='/authors/']"),
+                link_selector: Some("h3.novel-title a, a[href$='.html']"),
+                description_selector: Some(".desc-text"),
+                chapter_list_selector: "#list-chapter ul.list-chapter li a",
+                content_selector: "#chr-content",
+                remove_selectors: &["script", ".ads", "div[align='center']"],
+                language: Some("en"),
             }),
         ]
     }
@@ -425,6 +469,8 @@ impl SourceRegistry {
                 | "wuxiabox"
                 | "nobadnovel"
                 | "wuxia_click"
+                | "hiraeth"
+                | "readnovelfull"
         ) {
             return Err(AppError::InvalidInput(
                 "Cannot overwrite built-in source ID".into(),

@@ -3,6 +3,7 @@ import { AlertCircle, Globe, Loader2, Search, SlidersHorizontal } from "lucide-r
 import { api, extractErrorMessage } from "../api/tauri";
 import { NovelSummaryCard } from "../components/NovelCard";
 import type { NovelSummary, SourceErrorBanner, SourceInfo } from "../types/novel";
+import { APP_LANGUAGES } from "../utils/format";
 
 interface DiscoverPageProps {
   initialQuery?: string;
@@ -39,6 +40,7 @@ export const DiscoverPage: React.FC<DiscoverPageProps> = ({
   const [genre, setGenre] = useState(initialGenre);
   const [sort, setSort] = useState(initialSort);
   const [status, setStatus] = useState("all");
+  const [language, setLanguage] = useState("all");
 
   const [items, setItems] = useState<NovelSummary[]>([]);
   const [page, setPage] = useState(1);
@@ -80,6 +82,7 @@ export const DiscoverPage: React.FC<DiscoverPageProps> = ({
           genre: genre === "All" ? null : genre,
           sort,
           status: status === "all" ? null : status,
+          language: language === "all" ? null : language,
           page: pageNum,
           limit: 20,
         });
@@ -106,7 +109,7 @@ export const DiscoverPage: React.FC<DiscoverPageProps> = ({
         setLoadingMore(false);
       }
     },
-    [selectedSource, appliedQuery, genre, sort, status],
+    [selectedSource, appliedQuery, genre, sort, status, language],
   );
 
   useEffect(() => {
@@ -226,6 +229,20 @@ export const DiscoverPage: React.FC<DiscoverPageProps> = ({
             <option value="all">All Statuses</option>
             <option value="completed">Completed</option>
             <option value="ongoing">Ongoing</option>
+          </select>
+
+          <select
+            aria-label="Filter language"
+            value={language}
+            onChange={(e) => setLanguage(e.target.value)}
+            className="px-2.5 py-1.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-xs text-[var(--text-primary)] focus:outline-none"
+          >
+            <option value="all">All Languages</option>
+            {APP_LANGUAGES.map((l) => (
+              <option key={l.code} value={l.code}>
+                {l.label}
+              </option>
+            ))}
           </select>
         </div>
       </div>

@@ -11,6 +11,8 @@ import {
   sourceLabel,
 } from "../utils/format";
 import { CoverImage } from "../components/CoverImage";
+import { DiscoverPage } from "../pages/DiscoverPage";
+import { LibraryPage } from "../pages/LibraryPage";
 import { NovelDetailsPage } from "../pages/NovelDetailsPage";
 import { ReaderPage } from "../pages/ReaderPage";
 import { SettingsPage } from "../pages/SettingsPage";
@@ -1793,5 +1795,109 @@ describe("New features: seamless scroll, flip toggle, colored annotations, and t
     await waitFor(() => {
       expect(onSelectNovel).toHaveBeenCalledWith("wikisource:pl|Duma_i_uprzedzenie");
     });
+  });
+
+  it("filters novels by language in Discover and Library", async () => {
+    mockApi.listSources.mockResolvedValue([]);
+    mockApi.discoverNovels.mockResolvedValue({
+      items: [
+        {
+          id: "gutenberg:10",
+          source_id: "gutenberg",
+          external_id: "10",
+          title: "Pan Tadeusz",
+          author: "Adam Mickiewicz",
+          description: "Polish epic",
+          cover_url: null,
+          local_cover_path: null,
+          status: "completed",
+          genres: ["Poetry"],
+          rating: null,
+          popularity: 100,
+          chapter_count: null,
+          last_updated: null,
+          language: "pl",
+        },
+      ],
+      page: 1,
+      has_more: false,
+      total_estimate: 1,
+      source_errors: [],
+    });
+
+    const { unmount } = render(<DiscoverPage onOpenNovel={vi.fn()} />);
+    const discoverLang = await screen.findByLabelText("Filter language");
+    fireEvent.change(discoverLang, { target: { value: "pl" } });
+    await waitFor(() => {
+      expect(mockApi.discoverNovels).toHaveBeenLastCalledWith(
+        expect.objectContaining({ language: "pl" }),
+      );
+    });
+    expect(screen.getAllByText("Pan Tadeusz").length).toBeGreaterThan(0);
+    unmount();
+
+    mockApi.listCollections.mockResolvedValue([]);
+    mockApi.listLibrary.mockResolvedValue([
+      {
+        novel: {
+          ...mkFeatureDetails().novel,
+          id: "gutenberg:en1",
+          title: "English Tale",
+          metadata: { language: "en" },
+        },
+        entry: {
+          novel_id: "gutenberg:en1",
+          status: "reading",
+          is_bookmarked: false,
+          follow_updates: false,
+          last_checked_chapters: 0,
+          added_at: "2026-05-01T00:00:00Z",
+          updated_at: "2026-05-01T00:00:00Z",
+        },
+        progress: null,
+        latest_chapter: null,
+        downloaded_chapters: 0,
+        total_size_bytes: 0,
+        collection_ids: [],
+      },
+      {
+        novel: {
+          ...mkFeatureDetails().novel,
+          id: "gutenberg:pl1",
+          title: "Polish Chronicle",
+          metadata: { language: "pl" },
+        },
+        entry: {
+          novel_id: "gutenberg:pl1",
+          status: "reading",
+          is_bookmarked: false,
+          follow_updates: false,
+          last_checked_chapters: 0,
+          added_at: "2026-05-01T00:00:00Z",
+          updated_at: "2026-05-01T00:00:00Z",
+        },
+        progress: null,
+        latest_chapter: null,
+        downloaded_chapters: 0,
+        total_size_bytes: 0,
+        collection_ids: [],
+      },
+    ]);
+
+    render(
+      <LibraryPage
+        onOpenNovel={vi.fn()}
+        onStartReading={vi.fn()}
+        onNotify={vi.fn()}
+      />,
+    );
+    expect((await screen.findAllByText("English Tale")).length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Polish Chronicle").length).toBeGreaterThan(0);
+
+    fireEvent.change(screen.getByLabelText("Filter library by language"), {
+      target: { value: "pl" },
+    });
+    expect(screen.queryByText("English Tale")).not.toBeInTheDocument();
+    expect(screen.getAllByText("Polish Chronicle").length).toBeGreaterThan(0);
   });
 });

@@ -494,6 +494,7 @@ impl GutenbergSource {
             } else {
                 Some(book.issued.clone())
             },
+            language: book.languages.first().cloned(),
         }
     }
 
@@ -835,11 +836,19 @@ impl NovelSource for GutenbergSource {
             return Ok((Vec::new(), false, Some(0)));
         }
 
-        let lang = config
-            .get("language")
-            .and_then(|v| v.as_str())
-            .unwrap_or("en")
-            .to_ascii_lowercase();
+        let lang = query
+            .language
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("all"))
+            .map(Self::language_name_to_code)
+            .unwrap_or_else(|| {
+                config
+                    .get("language")
+                    .and_then(|v| v.as_str())
+                    .map(Self::language_name_to_code)
+                    .unwrap_or_else(|| "en".to_string())
+            });
         let q_str = query.query.as_deref().map(str::trim).unwrap_or("");
         let genre_str = query
             .genre
@@ -898,6 +907,7 @@ impl NovelSource for GutenbergSource {
                                     popularity: entry.downloads,
                                     chapter_count: None,
                                     last_updated: None,
+                                    language: Some(lang.clone()),
                                 }
                             }
                         })
@@ -968,7 +978,13 @@ impl NovelSource for GutenbergSource {
             .into_iter()
             .skip(offset)
             .take(limit)
-            .map(|(b, dl)| self.catalog_book_to_summary(b, dl))
+            .map(|(b, dl)| {
+                let mut sum = self.catalog_book_to_summary(b, dl);
+                if b.languages.iter().any(|l| l == &lang) {
+                    sum.language = Some(lang.clone());
+                }
+                sum
+            })
             .collect();
 
         Ok((items, has_more, Some(total)))
@@ -1217,6 +1233,7 @@ mod tests {
                     genre: None,
                     sort: Some("popular".into()),
                     status: None,
+                    language: None,
                     page: 1,
                     limit: 10,
                 },
@@ -1237,6 +1254,7 @@ mod tests {
                     genre: Some("Science Fiction".into()),
                     sort: None,
                     status: None,
+                    language: None,
                     page: 1,
                     limit: 10,
                 },

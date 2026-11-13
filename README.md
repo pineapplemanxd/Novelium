@@ -7,10 +7,10 @@ Cross-platform desktop novel reader and personal library built with **Rust**, **
 ## Features
 
 ### Discovery & Modular Sources
-- Multi-source catalog browsing, title/author search, genre filtering, sorting, and infinite pagination.
-- **Built-in sources**: Project Gutenberg (`gutenberg`), Wikisource (`wikisource`), Internet Archive (`archive_org`), plus HTML presets (`fanmtl`, `wuxiabox`, `nobadnovel`, `wuxia_click`).
+- Multi-source catalog browsing, title/author search, genre/status/language filtering, sorting, and infinite pagination.
+- **Built-in sources**: Project Gutenberg (`gutenberg`), Wikisource (`wikisource`), Internet Archive (`archive_org`), plus HTML presets (`fanmtl`, `wuxiabox`, `nobadnovel`, `wuxia_click`, `hiraeth`, `readnovelfull`).
 - **Extensible source system**: Add, enable/disable, test, and configure custom **OPDS** or CSS-selector **HTML** sources directly from Settings without editing core Rust code.
-- **Translations & Language Menu**: Discover available language editions on the Novel Details and Reader views (Wikisource interlanguage links, Gutenberg catalog matches, Archive.org metadata, and matching local editions) with a configurable default language in Settings.
+- **Translations & Language Filtering**: Filter discovery catalogs and your personal library by language, switch between available language editions on Novel Details and Reader views, and set your preferred default language in Settings.
 
 ### Distraction-Free Reading Studio
 - **Continuous Scroll & Book Flip Modes**: Switch between seamless vertical scrolling and book-style page flipping with an optional flip animation toggle.

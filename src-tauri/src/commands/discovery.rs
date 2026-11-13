@@ -75,6 +75,22 @@ pub async fn discover_novels(
         }
     }
 
+    if let Some(req_lang) = query
+        .language
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("all"))
+    {
+        let req_low = req_lang.to_ascii_lowercase();
+        let req_prefix = format!("{req_low}-");
+        all_items.retain(|it| {
+            it.language.as_deref().is_some_and(|l| {
+                let low = l.trim().to_ascii_lowercase();
+                low == req_low || low.starts_with(&req_prefix)
+            })
+        });
+    }
+
     // Interleave or sort cleanly across sources
     match query.sort.as_deref() {
         Some("title") => all_items.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase())),

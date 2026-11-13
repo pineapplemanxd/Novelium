@@ -153,6 +153,8 @@ pub struct NovelSummary {
     pub popularity: i64,
     pub chapter_count: Option<i64>,
     pub last_updated: Option<String>,
+    #[serde(default)]
+    pub language: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -459,6 +461,8 @@ pub struct DiscoveryQuery {
     pub genre: Option<String>,
     pub sort: Option<String>,   // "popular" | "trending" | "latest" | "title"
     pub status: Option<String>, // "all" | "ongoing" | "completed"
+    #[serde(default)]
+    pub language: Option<String>, // ISO 639-1 code e.g. "en", "pl", "es", or "all"
     pub page: u32,
     pub limit: u32,
 }

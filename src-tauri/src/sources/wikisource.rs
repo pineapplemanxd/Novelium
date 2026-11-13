@@ -58,10 +58,6 @@ impl WikisourceSource {
         format!("https://{lang}.wikisource.org")
     }
 
-    fn base_origin(&self, config: &HashMap<String, Value>) -> String {
-        self.base_origin_for_lang(&Self::wiki_lang(config))
-    }
-
     fn resolve_lang_and_title<'a>(
         config: &HashMap<String, Value>,
         raw_id: &'a str,
@@ -214,11 +210,11 @@ impl WikisourceSource {
 
     async fn fetch_category_items(
         &self,
-        config: &HashMap<String, Value>,
+        lang: &str,
         category: &str,
         genre_label: &str,
     ) -> AppResult<Vec<WikiCatItem>> {
-        let origin = self.base_origin(config);
+        let origin = self.base_origin_for_lang(lang);
         let cache_key = format!("{origin}|{category}");
         {
             let guard = self.cat_cache.lock().await;
@@ -229,7 +225,8 @@ impl WikisourceSource {
             }
         }
 
-        let url = self.page_url(config, category)?;
+        let empty_cfg = HashMap::new();
+        let url = self.page_url(&empty_cfg, &format!("{lang}|{category}"))?;
         let html = self.http.get_text(&url).await?;
         let items = {
             let base_url = Url::parse(&url)?;
@@ -620,7 +617,19 @@ impl NovelSource for WikisourceSource {
             return Ok((Vec::new(), false, Some(0)));
         }
 
-        let lang = Self::wiki_lang(config);
+        let cfg_lang = Self::wiki_lang(config);
+        let lang = query
+            .language
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| {
+                !s.is_empty()
+                    && !s.eq_ignore_ascii_case("all")
+                    && s.len() <= 8
+                    && s.chars().all(|c| c.is_ascii_alphabetic())
+            })
+            .map(str::to_ascii_lowercase)
+            .unwrap_or_else(|| cfg_lang.clone());
         let genre_label = query
             .genre
             .as_deref()
@@ -629,7 +638,7 @@ impl NovelSource for WikisourceSource {
         let primary_cat = Self::category_for_lang_and_genre(&lang, query.genre.as_deref());
 
         let mut pool = self
-            .fetch_category_items(config, primary_cat, genre_label)
+            .fetch_category_items(&lang, primary_cat, genre_label)
             .await?;
 
         let q_str = query.query.as_deref().map(str::trim).unwrap_or("");
@@ -639,7 +648,7 @@ impl NovelSource for WikisourceSource {
                 if *cat == primary_cat {
                     continue;
                 }
-                if let Ok(extra) = self.fetch_category_items(config, cat, "Fiction").await {
+                if let Ok(extra) = self.fetch_category_items(&lang, cat, "Fiction").await {
                     for item in extra {
                         if seen.insert(item.external_id.clone()) {
                             pool.push(item);
@@ -675,21 +684,29 @@ impl NovelSource for WikisourceSource {
             .into_iter()
             .skip(offset)
             .take(limit)
-            .map(|entry| NovelSummary {
-                id: make_novel_id(self.id(), &entry.external_id),
-                source_id: self.id().to_string(),
-                external_id: entry.external_id,
-                title: entry.title,
-                author: "Wikisource Archive".to_string(),
-                description: "Public domain work hosted on Wikisource.".to_string(),
-                cover_url: None,
-                local_cover_path: None,
-                status: NovelStatus::Completed,
-                genres: vec![entry.genre],
-                rating: None,
-                popularity: 0,
-                chapter_count: None,
-                last_updated: None,
+            .map(|entry| {
+                let ext = if lang == cfg_lang {
+                    entry.external_id
+                } else {
+                    format!("{lang}|{}", entry.external_id)
+                };
+                NovelSummary {
+                    id: make_novel_id(self.id(), &ext),
+                    source_id: self.id().to_string(),
+                    external_id: ext,
+                    title: entry.title,
+                    author: "Wikisource Archive".to_string(),
+                    description: "Public domain work hosted on Wikisource.".to_string(),
+                    cover_url: None,
+                    local_cover_path: None,
+                    status: NovelStatus::Completed,
+                    genres: vec![entry.genre],
+                    rating: None,
+                    popularity: 0,
+                    chapter_count: None,
+                    last_updated: None,
+                    language: Some(lang.clone()),
+                }
             })
             .collect();
 
@@ -956,6 +973,7 @@ mod tests {
                     genre: None,
                     sort: None,
                     status: None,
+                    language: None,
                     page: 1,
                     limit: 10,
                 },
