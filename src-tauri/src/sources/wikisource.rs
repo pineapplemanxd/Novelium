@@ -308,11 +308,20 @@ impl WikisourceSource {
         };
 
         let ws_author = text_of("#ws-author");
-        let hdr_author = text_of(".wst-header .fn, .gen_header_foreword a, #headerContainer .fn");
-        let author = if !ws_author.is_empty() {
+        let hdr_author = text_of(
+            ".wst-header .fn a, .wst-header .fn, .wst-header .contributor-text a, .wst-header a[href*='Author:'], .gen_header_foreword a, #headerContainer .fn",
+        );
+        let raw_author = if !ws_author.is_empty() {
             ws_author
-        } else if !hdr_author.is_empty() {
+        } else {
             hdr_author
+        };
+        let cleaned_author = raw_author
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let author = if !cleaned_author.is_empty() {
+            cleaned_author
         } else {
             "Wikisource Edition".to_string()
         };

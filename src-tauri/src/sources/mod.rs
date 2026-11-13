@@ -1,6 +1,7 @@
 pub mod archive_org;
 pub mod declarative;
 pub mod gutenberg;
+pub mod standardebooks;
 pub mod wikisource;
 
 use std::collections::HashMap;
@@ -233,6 +234,7 @@ impl SourceRegistry {
                 self.http.clone(),
                 self.book_cache.clone(),
             )),
+            Arc::new(standardebooks::StandardEbooksSource::new(self.http.clone())),
             self.html_preset(HtmlPreset {
                 id: "fanmtl",
                 name: "FanMTL",
@@ -242,7 +244,7 @@ impl SourceRegistry {
                 search_url_template: None,
                 novel_list_selector: "li.novel-item",
                 title_selector: "h1.novel-title, h4.novel-title",
-                author_selector: Some(".author span[itemprop='author']"),
+                author_selector: Some(".author span[itemprop='author'], [itemprop='author']"),
                 link_selector: Some("a[href^='/novel/']"),
                 description_selector: Some(".summary .content"),
                 chapter_list_selector: "ul.chapter-list li a",
@@ -259,7 +261,7 @@ impl SourceRegistry {
                 search_url_template: None,
                 novel_list_selector: "li.novel-item",
                 title_selector: "h1.novel-title, h4.novel-title",
-                author_selector: Some(".author span[itemprop='author']"),
+                author_selector: Some(".author span[itemprop='author'], [itemprop='author']"),
                 link_selector: Some("a[href^='/novel/']"),
                 description_selector: Some(".summary .content"),
                 chapter_list_selector: "ul.chapter-list li a",
@@ -278,7 +280,7 @@ impl SourceRegistry {
                 ),
                 novel_list_selector: ".grid > div",
                 title_selector: "h4 a, h1",
-                author_selector: None,
+                author_selector: Some("a[href*='author=']"),
                 link_selector: Some("h4 a, a[href*='/series/']"),
                 description_selector: Some("#intro .content"),
                 chapter_list_selector: "#table a[href*='/chapter-']",
@@ -294,8 +296,8 @@ impl SourceRegistry {
                 browse_url_template: "https://wuxia.click/browse?page={page}",
                 search_url_template: Some("https://wuxia.click/browse?search={query}&page={page}"),
                 novel_list_selector: "main a[href^='/novel/']",
-                title_selector: "h3, h1",
-                author_selector: None,
+                title_selector: "h1, h3",
+                author_selector: Some("a[href^='/author/']"),
                 link_selector: None,
                 description_selector: Some("main p"),
                 chapter_list_selector: "li a[href^='/chapter/']",
@@ -314,7 +316,7 @@ impl SourceRegistry {
                 ),
                 novel_list_selector: ".page-item-detail, .c-tabs-item__content",
                 title_selector: ".post-title h3 a, .post-title h4 a, .post-title a, .post-title h1",
-                author_selector: Some(".author-content a"),
+                author_selector: Some(".author-content a, .author-content"),
                 link_selector: Some(".post-title a, .item-thumb a, .tab-thumb a"),
                 description_selector: Some(".summary__content"),
                 chapter_list_selector: "li.wp-manga-chapter a",
@@ -464,6 +466,7 @@ impl SourceRegistry {
             "gutenberg"
                 | "wikisource"
                 | "archive_org"
+                | "standardebooks"
                 | "local"
                 | "fanmtl"
                 | "wuxiabox"
@@ -553,7 +556,11 @@ impl SourceRegistry {
         let mut out = Vec::new();
         for info in infos {
             if let Some(target_id) = filter_source_id {
-                if info.id != target_id {
+                if target_id.contains(',') {
+                    if !info.enabled || !target_id.split(',').any(|id| id.trim() == info.id) {
+                        continue;
+                    }
+                } else if info.id != target_id {
                     continue;
                 }
             } else if !info.enabled {

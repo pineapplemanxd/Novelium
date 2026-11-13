@@ -97,10 +97,19 @@ export function languageLabel(code?: string | null, fallback?: string | null): s
   return hit ? hit.label : fallback || norm.toUpperCase();
 }
 
+export const OPEN_BOOK_SOURCE_IDS = [
+  "gutenberg",
+  "standardebooks",
+  "archive_org",
+  "wikisource",
+] as const;
+
 export function sourceLabel(sourceId: string): string {
   switch (sourceId) {
     case "gutenberg":
       return "Project Gutenberg";
+    case "standardebooks":
+      return "Standard Ebooks";
     case "wikisource":
       return "Wikisource";
     case "archive_org":

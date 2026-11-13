@@ -104,6 +104,7 @@ const BASE_SETTINGS: AppSettings = {
   sidebar_sections: [
     "home",
     "discover",
+    "books",
     "explore",
     "library",
     "downloads",
@@ -1899,5 +1900,120 @@ describe("New features: seamless scroll, flip toggle, colored annotations, and t
     });
     expect(screen.queryByText("English Tale")).not.toBeInTheDocument();
     expect(screen.getAllByText("Polish Chronicle").length).toBeGreaterThan(0);
+  });
+
+  it("opens Books section scoped to legal open-access catalogs and renders authors", async () => {
+    mockApi.listSources.mockResolvedValue([
+      {
+        id: "gutenberg",
+        name: "Project Gutenberg",
+        kind: "builtin",
+        base_url: "https://www.gutenberg.org",
+        description: "Public domain books",
+        enabled: true,
+        priority: 1,
+        health_status: "online",
+        last_checked_at: null,
+        capabilities: {
+          search: true,
+          browse_popular: true,
+          browse_trending: true,
+          browse_latest: true,
+          browse_genre: true,
+          filter_status: true,
+          genres: ["Fiction"],
+        },
+        config: {},
+        config_schema: [],
+        is_custom: false,
+      },
+      {
+        id: "standardebooks",
+        name: "Standard Ebooks",
+        kind: "builtin",
+        base_url: "https://standardebooks.org",
+        description: "Open domain editions",
+        enabled: true,
+        priority: 4,
+        health_status: "online",
+        last_checked_at: null,
+        capabilities: {
+          search: true,
+          browse_popular: true,
+          browse_trending: false,
+          browse_latest: false,
+          browse_genre: false,
+          filter_status: false,
+          genres: ["Fiction"],
+        },
+        config: {},
+        config_schema: [],
+        is_custom: false,
+      },
+      {
+        id: "fanmtl",
+        name: "FanMTL",
+        kind: "declarative_html",
+        base_url: "https://www.fanmtl.com",
+        description: "Web novels",
+        enabled: true,
+        priority: 10,
+        health_status: "online",
+        last_checked_at: null,
+        capabilities: {
+          search: false,
+          browse_popular: true,
+          browse_trending: false,
+          browse_latest: true,
+          browse_genre: false,
+          filter_status: false,
+          genres: ["Fantasy"],
+        },
+        config: {},
+        config_schema: [],
+        is_custom: false,
+      },
+    ]);
+    mockApi.discoverNovels.mockResolvedValue({
+      items: [
+        {
+          id: "standardebooks:arthur-conan-doyle/sir-nigel",
+          source_id: "standardebooks",
+          external_id: "arthur-conan-doyle/sir-nigel",
+          title: "Sir Nigel",
+          author: "Arthur Conan Doyle",
+          description: "Public domain historical romance.",
+          cover_url: null,
+          local_cover_path: null,
+          status: "completed",
+          genres: ["Fiction"],
+          rating: null,
+          popularity: 500,
+          chapter_count: null,
+          last_updated: null,
+          language: "en",
+        },
+      ],
+      page: 1,
+      has_more: false,
+      total_estimate: 1,
+      source_errors: [],
+    });
+
+    render(<App />);
+    const booksNavBtn = await screen.findByRole("button", { name: /^Books$/i });
+    fireEvent.click(booksNavBtn);
+
+    await waitFor(() => {
+      expect(mockApi.discoverNovels).toHaveBeenCalledWith(
+        expect.objectContaining({
+          source_id: "gutenberg,standardebooks,archive_org,wikisource",
+        }),
+      );
+    });
+    expect((await screen.findAllByText("Sir Nigel")).length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Arthur Conan Doyle").length).toBeGreaterThan(0);
+    expect(screen.getByRole("button", { name: "Standard Ebooks" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "FanMTL" })).not.toBeInTheDocument();
   });
 });

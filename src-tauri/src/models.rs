@@ -535,6 +535,20 @@ pub struct AppSettings {
     pub default_language: String,
 }
 
+/// Returns true when an author label is empty or a generic unscraped placeholder.
+pub fn is_placeholder_author(author: &str) -> bool {
+    let norm = author.trim().to_ascii_lowercase();
+    norm.is_empty()
+        || matches!(
+            norm.as_str(),
+            "unknown"
+                | "unknown author"
+                | "wikisource archive"
+                | "wikisource edition"
+                | "anonymous"
+        )
+}
+
 impl AppSettings {
     pub fn default_with_dir(download_dir: String) -> Self {
         Self {
@@ -544,6 +558,7 @@ impl AppSettings {
             sidebar_sections: vec![
                 "home".into(),
                 "discover".into(),
+                "books".into(),
                 "explore".into(),
                 "library".into(),
                 "downloads".into(),

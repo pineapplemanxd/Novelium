@@ -3,9 +3,10 @@ import { AlertCircle, Globe, Loader2, Search, SlidersHorizontal } from "lucide-r
 import { api, extractErrorMessage } from "../api/tauri";
 import { NovelSummaryCard } from "../components/NovelCard";
 import type { NovelSummary, SourceErrorBanner, SourceInfo } from "../types/novel";
-import { APP_LANGUAGES } from "../utils/format";
+import { APP_LANGUAGES, OPEN_BOOK_SOURCE_IDS } from "../utils/format";
 
 interface DiscoverPageProps {
+  mode?: "all" | "books";
   initialQuery?: string;
   initialGenre?: string;
   initialSort?: string;
@@ -28,11 +29,13 @@ const GENRES = [
 ];
 
 export const DiscoverPage: React.FC<DiscoverPageProps> = ({
+  mode = "all",
   initialQuery = "",
   initialGenre = "All",
   initialSort = "popular",
   onOpenNovel,
 }) => {
+  const isBooksMode = mode === "books";
   const [sources, setSources] = useState<SourceInfo[]>([]);
   const [selectedSource, setSelectedSource] = useState<string>("all");
   const [searchInput, setSearchInput] = useState(initialQuery);
@@ -76,8 +79,14 @@ export const DiscoverPage: React.FC<DiscoverPageProps> = ({
       else setLoading(true);
       setErrorMsg(null);
       try {
+        const sourceFilter =
+          selectedSource !== "all"
+            ? selectedSource
+            : isBooksMode
+              ? OPEN_BOOK_SOURCE_IDS.join(",")
+              : null;
         const res = await api.discoverNovels({
-          source_id: selectedSource === "all" ? null : selectedSource,
+          source_id: sourceFilter,
           query: appliedQuery.trim() || null,
           genre: genre === "All" ? null : genre,
           sort,
@@ -109,7 +118,7 @@ export const DiscoverPage: React.FC<DiscoverPageProps> = ({
         setLoadingMore(false);
       }
     },
-    [selectedSource, appliedQuery, genre, sort, status, language],
+    [selectedSource, isBooksMode, appliedQuery, genre, sort, status, language],
   );
 
   useEffect(() => {
@@ -132,16 +141,24 @@ export const DiscoverPage: React.FC<DiscoverPageProps> = ({
     return () => obs.disconnect();
   }, [hasMore, loading, loadingMore, page, fetchPage]);
 
-  const enabledSources = sources.filter((s) => s.enabled);
+  const enabledSources = sources.filter(
+    (s) =>
+      s.enabled &&
+      (!isBooksMode ||
+        (OPEN_BOOK_SOURCE_IDS as readonly string[]).includes(s.id)),
+  );
 
   return (
     <div className="p-6 max-w-[1440px] mx-auto space-y-5">
       <div className="flex flex-col md:flex-row md:items-end justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Discover Novels</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">
+            {isBooksMode ? "Books" : "Discover Novels"}
+          </h1>
           <p className="text-sm text-[var(--text-secondary)] mt-0.5">
-            Search and browse across {enabledSources.length} enabled source
-            {enabledSources.length === 1 ? "" : "s"}
+            {isBooksMode
+              ? `Open-access & public-domain books across ${enabledSources.length} legal catalog${enabledSources.length === 1 ? "" : "s"}`
+              : `Search and browse across ${enabledSources.length} enabled source${enabledSources.length === 1 ? "" : "s"}`}
             {totalEstimate ? ` · ~${totalEstimate.toLocaleString()} titles` : ""}
           </p>
         </div>
@@ -187,7 +204,7 @@ export const DiscoverPage: React.FC<DiscoverPageProps> = ({
             style={selectedSource === "all" ? { backgroundColor: "var(--accent)" } : undefined}
           >
             <Globe className="w-3.5 h-3.5" />
-            All Sources
+            {isBooksMode ? "All Books" : "All Sources"}
           </button>
           {enabledSources.map((src) => (
             <button

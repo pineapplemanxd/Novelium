@@ -262,8 +262,18 @@ impl Database {
                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
                 ON CONFLICT(id) DO UPDATE SET
                     title = CASE WHEN excluded.title != '' THEN excluded.title ELSE novels.title END,
-                    author_id = COALESCE(excluded.author_id, novels.author_id),
-                    author_name = CASE WHEN excluded.author_name != '' THEN excluded.author_name ELSE novels.author_name END,
+                    author_id = CASE
+                        WHEN excluded.author_name != '' AND lower(trim(excluded.author_name)) NOT IN ('unknown', 'unknown author', 'wikisource archive', 'wikisource edition', 'anonymous')
+                        THEN COALESCE(excluded.author_id, novels.author_id)
+                        ELSE COALESCE(novels.author_id, excluded.author_id)
+                    END,
+                    author_name = CASE
+                        WHEN excluded.author_name != '' AND lower(trim(excluded.author_name)) NOT IN ('unknown', 'unknown author', 'wikisource archive', 'wikisource edition', 'anonymous')
+                        THEN excluded.author_name
+                        WHEN novels.author_name = '' OR novels.author_name IS NULL
+                        THEN excluded.author_name
+                        ELSE novels.author_name
+                    END,
                     description = CASE WHEN excluded.description != '' THEN excluded.description ELSE novels.description END,
                     cover_url = COALESCE(excluded.cover_url, novels.cover_url),
                     local_cover_path = COALESCE(excluded.local_cover_path, novels.local_cover_path),
@@ -2217,5 +2227,45 @@ mod tests {
         let bms = db.list_bookmarks(Some(&novel.id)).unwrap();
         assert_eq!(bms.len(), 1);
         assert_eq!(bms[0].chapter_id, None);
+    }
+
+    #[test]
+    fn test_upsert_novel_preserves_scraped_author_against_placeholders() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(dir.path().join("author.db")).unwrap();
+        let mut novel = sample_novel("fanmtl:123");
+        novel.source_id = "fanmtl".into();
+        novel.external_id = "123".into();
+        novel.author = "Jane Writer".into();
+        db.upsert_novel(&novel).unwrap();
+
+        let summary = NovelSummary {
+            id: novel.id.clone(),
+            source_id: "fanmtl".into(),
+            external_id: "123".into(),
+            title: novel.title.clone(),
+            author: "Unknown Author".into(),
+            description: String::new(),
+            cover_url: None,
+            local_cover_path: None,
+            status: NovelStatus::Ongoing,
+            genres: vec![],
+            rating: None,
+            popularity: 0,
+            chapter_count: None,
+            last_updated: None,
+            language: Some("en".into()),
+        };
+        let after_placeholder = db.upsert_novel_from_summary(&summary).unwrap();
+        assert_eq!(after_placeholder.author, "Jane Writer");
+
+        let mut replacement = sample_novel("nobadnovel:456");
+        replacement.source_id = "nobadnovel".into();
+        replacement.external_id = "456".into();
+        replacement.author = "Unknown Author".into();
+        db.upsert_novel(&replacement).unwrap();
+        replacement.author = "Dancing raindrops".into();
+        let repaired = db.upsert_novel(&replacement).unwrap();
+        assert_eq!(repaired.author, "Dancing raindrops");
     }
 }

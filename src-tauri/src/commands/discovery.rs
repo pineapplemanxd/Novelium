@@ -6,8 +6,8 @@ use tauri::State;
 use crate::downloads::StoredChapterPayload;
 use crate::error::{AppError, AppResult};
 use crate::models::{
-    Chapter, ChapterContent, DiscoveryPage, DiscoveryQuery, NovelDetailsResponse, NovelRecord,
-    NovelSummary, NovelTranslation, SourceErrorBanner,
+    is_placeholder_author, Chapter, ChapterContent, DiscoveryPage, DiscoveryQuery,
+    NovelDetailsResponse, NovelRecord, NovelSummary, NovelTranslation, SourceErrorBanner,
 };
 use crate::state::AppState;
 
@@ -91,6 +91,17 @@ pub async fn discover_novels(
         });
     }
 
+    // Fill missing authors on browse cards from previously scraped SQLite records.
+    for item in &mut all_items {
+        if is_placeholder_author(&item.author) {
+            if let Ok(Some(cached)) = state.db.get_novel(&item.id) {
+                if !is_placeholder_author(&cached.author) {
+                    item.author = cached.author;
+                }
+            }
+        }
+    }
+
     // Interleave or sort cleanly across sources
     match query.sort.as_deref() {
         Some("title") => all_items.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase())),
@@ -134,8 +145,11 @@ pub async fn get_novel_details(
     };
 
     let is_local = novel.as_ref().map(|n| n.is_local).unwrap_or(false);
+    let missing_author = novel
+        .as_ref()
+        .is_some_and(|n| is_placeholder_author(&n.author));
 
-    if !is_local && (novel.is_none() || chapters.is_empty() || should_refresh) {
+    if !is_local && (novel.is_none() || chapters.is_empty() || should_refresh || missing_author) {
         if let Some(src) = state.sources.get_source(&source_id).await {
             let cfg = state
                 .sources
@@ -144,7 +158,7 @@ pub async fn get_novel_details(
                 .map(|i| i.config)
                 .unwrap_or_default();
 
-            if novel.is_none() || chapters.is_empty() || should_refresh {
+            if novel.is_none() || chapters.is_empty() || should_refresh || missing_author {
                 match src.get_novel(&external_id, &cfg).await {
                     Ok(remote_novel) => {
                         novel = Some(state.db.upsert_novel(&remote_novel)?);

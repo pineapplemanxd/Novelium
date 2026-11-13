@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from "react";
 import {
   Bookmark,
+  BookMarked,
   BookOpen,
   Clock,
   Compass,
@@ -33,6 +34,7 @@ import type { AppSettings, NovelSummary } from "./types/novel";
 type MainTab =
   | "home"
   | "discover"
+  | "books"
   | "explore"
   | "library"
   | "downloads"
@@ -47,6 +49,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   sidebar_sections: [
     "home",
     "discover",
+    "books",
     "explore",
     "library",
     "downloads",
@@ -78,6 +81,7 @@ const DEFAULT_SETTINGS: AppSettings = {
 const NAV_ITEMS: { id: MainTab; label: string; icon: React.ElementType }[] = [
   { id: "home", label: "Home", icon: Home },
   { id: "discover", label: "Discover", icon: Globe },
+  { id: "books", label: "Books", icon: BookMarked },
   { id: "explore", label: "Explore", icon: Compass },
   { id: "library", label: "Library", icon: Library },
   { id: "downloads", label: "Downloads", icon: Download },
@@ -270,7 +274,10 @@ export function App() {
   }
 
   const visibleNavItems = NAV_ITEMS.filter(
-    (item) => item.id === "settings" || settings.sidebar_sections.includes(item.id),
+    (item) =>
+      item.id === "settings" ||
+      item.id === "books" ||
+      settings.sidebar_sections.includes(item.id),
   );
 
   return (
@@ -421,9 +428,16 @@ export function App() {
             />
           ) : activeTab === "discover" ? (
             <DiscoverPage
+              key="discover"
               initialQuery={discoverFilters.query}
               initialGenre={discoverFilters.genre}
               initialSort={discoverFilters.sort}
+              onOpenNovel={handleOpenRemoteNovel}
+            />
+          ) : activeTab === "books" ? (
+            <DiscoverPage
+              key="books"
+              mode="books"
               onOpenNovel={handleOpenRemoteNovel}
             />
           ) : activeTab === "explore" ? (

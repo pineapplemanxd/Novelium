@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use async_trait::async_trait;
 use chrono::Utc;
-use scraper::{Html, Selector};
+use scraper::{ElementRef, Html, Selector};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use url::Url;
@@ -11,7 +11,8 @@ use crate::error::{AppError, AppResult};
 use crate::formats::epub::parse_epub_bytes;
 use crate::formats::text_html::{clean_html_fragment_excluding, parse_html_bytes};
 use crate::models::{
-    Chapter, DiscoveryQuery, NovelRecord, NovelStatus, NovelSummary, SourceCapabilities,
+    is_placeholder_author, Chapter, DiscoveryQuery, NovelRecord, NovelStatus, NovelSummary,
+    SourceCapabilities,
 };
 use crate::net::SourceHttpClient;
 use crate::sources::{make_chapter_id, make_novel_id, CachedParsedBook, NovelSource, ParsedBookCache};
@@ -298,11 +299,7 @@ impl DeclarativeSource {
             let Some(href) = href else { continue };
             let novel_url = self.resolve_url(page_url, href);
 
-            let author = author_sel
-                .as_ref()
-                .and_then(|s| card.select(s).next())
-                .map(|e| e.text().collect::<String>().trim().to_string())
-                .filter(|s| !s.is_empty())
+            let author = extract_html_card_author(&card, author_sel.as_ref())
                 .unwrap_or_else(|| "Unknown Author".into());
 
             let cover_url = cover_sel
@@ -537,15 +534,11 @@ impl NovelSource for DeclarativeSource {
                     .map(|e| e.text().collect::<String>().trim().to_string())
                     .filter(|s| !s.is_empty())
                     .unwrap_or_else(|| external_id.to_string());
-                let author = self
-                    .manifest
-                    .author_selector
-                    .as_deref()
-                    .and_then(|s| Selector::parse(s).ok())
-                    .and_then(|sel| doc.select(&sel).next())
-                    .map(|e| e.text().collect::<String>().trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or_else(|| "Unknown Author".into());
+                let author = extract_html_detail_author(
+                    &doc,
+                    self.manifest.author_selector.as_deref(),
+                )
+                .unwrap_or_else(|| "Unknown Author".into());
                 let description = self
                     .manifest
                     .description_selector
@@ -786,6 +779,155 @@ fn extract_chapter_order_num(title: &str, url: &str) -> Option<f64> {
         None
     };
     parse_after_kw(title).or_else(|| parse_after_kw(url))
+}
+
+/// Collapses whitespace and strips common HTML label prefixes ("Author:", "By ").
+fn clean_author_text(raw: &str) -> Option<String> {
+    let mut s = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    let prefixes = ["author(s):", "authors:", "author:", "written by ", "by "];
+    for p in prefixes {
+        if s.len() >= p.len() && s[..p.len()].eq_ignore_ascii_case(p) {
+            s = s[p.len()..].trim().to_string();
+            break;
+        }
+    }
+    let trimmed = s.trim_matches(|c: char| c.is_whitespace() || matches!(c, ':' | '-' | '|'));
+    if trimmed.is_empty() || trimmed.len() > 140 || is_placeholder_author(trimmed) {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn json_ld_author_value(val: &Value) -> Option<String> {
+    match val {
+        Value::String(s) => clean_author_text(s),
+        Value::Object(map) => {
+            if let Some(auth) = map.get("author").and_then(json_ld_author_value) {
+                return Some(auth);
+            }
+            if let Some(name) = map.get("name").and_then(|n| n.as_str()) {
+                return clean_author_text(name);
+            }
+            if let Some(graph) = map.get("@graph").and_then(json_ld_author_value) {
+                return Some(graph);
+            }
+            None
+        }
+        Value::Array(arr) => {
+            let names: Vec<String> = arr
+                .iter()
+                .filter_map(|item| match item {
+                    Value::String(s) => clean_author_text(s),
+                    Value::Object(m) => m
+                        .get("name")
+                        .and_then(|n| n.as_str())
+                        .and_then(clean_author_text)
+                        .or_else(|| json_ld_author_value(item)),
+                    _ => json_ld_author_value(item),
+                })
+                .collect();
+            if names.is_empty() {
+                None
+            } else {
+                clean_author_text(&names.join(", "))
+            }
+        }
+        _ => None,
+    }
+}
+
+fn extract_json_ld_author(doc: &Html) -> Option<String> {
+    let sel = Selector::parse("script[type='application/ld+json']").ok()?;
+    for script in doc.select(&sel) {
+        let raw = script.text().collect::<String>();
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Ok(val) = serde_json::from_str::<Value>(trimmed) {
+            if let Some(author) = json_ld_author_value(&val) {
+                return Some(author);
+            }
+        }
+    }
+    None
+}
+
+fn extract_html_card_author(card: &ElementRef<'_>, explicit: Option<&Selector>) -> Option<String> {
+    if let Some(sel) = explicit {
+        for el in card.select(sel) {
+            if let Some(cleaned) = clean_author_text(&el.text().collect::<String>()) {
+                return Some(cleaned);
+            }
+        }
+    }
+    const CARD_FALLBACKS: &[&str] = &[
+        "[itemprop='author'] [itemprop='name']",
+        "[itemprop='author']",
+        ".author a",
+        ".author",
+        ".book-author",
+        ".novel-author",
+        "a[href*='/author']",
+        "a[href*='author=']",
+    ];
+    for css in CARD_FALLBACKS {
+        if let Ok(sel) = Selector::parse(css) {
+            for el in card.select(&sel) {
+                if let Some(cleaned) = clean_author_text(&el.text().collect::<String>()) {
+                    return Some(cleaned);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn extract_html_detail_author(doc: &Html, explicit: Option<&str>) -> Option<String> {
+    if let Some(sel_str) = explicit {
+        if let Ok(sel) = Selector::parse(sel_str) {
+            for el in doc.select(&sel) {
+                let candidate = el
+                    .value()
+                    .attr("content")
+                    .map(str::to_string)
+                    .unwrap_or_else(|| el.text().collect::<String>());
+                if let Some(cleaned) = clean_author_text(&candidate) {
+                    return Some(cleaned);
+                }
+            }
+        }
+    }
+
+    const DETAIL_FALLBACKS: &[&str] = &[
+        "[itemprop='author'] [itemprop='name']",
+        "[itemprop='author']",
+        "meta[name='author']",
+        "a[href*='/author/']",
+        "a[href*='/authors/']",
+        "a[href*='author=']",
+        "a[href*='novel-author']",
+        ".author-content a",
+        ".author a",
+        ".author",
+        ".book-author",
+    ];
+    for css in DETAIL_FALLBACKS {
+        if let Ok(sel) = Selector::parse(css) {
+            for el in doc.select(&sel) {
+                let raw = if el.value().name() == "meta" {
+                    el.value().attr("content").unwrap_or("").to_string()
+                } else {
+                    el.text().collect::<String>()
+                };
+                if let Some(cleaned) = clean_author_text(&raw) {
+                    return Some(cleaned);
+                }
+            }
+        }
+    }
+    extract_json_ld_author(doc)
 }
 
 #[cfg(test)]
@@ -1214,5 +1356,33 @@ mod tests {
         assert_eq!(chapters[1].title, "Chapter 2");
         assert_eq!(chapters[1].chapter_number, 2.0);
         server_handle.abort();
+    }
+
+    #[test]
+    fn test_extract_html_author_fallbacks_and_cleanup() {
+        let jsonld_html = Html::parse_document(
+            r#"<html><head><script type="application/ld+json">{"@type":"Book","name":"Mysteries","author":{"@type":"Person","name":"Cuttlefish That Loves Diving"}}</script></head><body><h1>Mysteries</h1></body></html>"#,
+        );
+        assert_eq!(
+            extract_html_detail_author(&jsonld_html, None).as_deref(),
+            Some("Cuttlefish That Loves Diving")
+        );
+
+        let nobad_html = Html::parse_document(
+            r#"<html><body><span class="mr-2">Author:</span><a href="/series?author=abc">  Dancing   raindrops </a></body></html>"#,
+        );
+        assert_eq!(
+            extract_html_detail_author(&nobad_html, None).as_deref(),
+            Some("Dancing raindrops")
+        );
+
+        let dirty_span = Html::parse_document(
+            r#"<html><body><span class="author"><span class="icon"></span>
+            Author:  Aravind_S  </span></body></html>"#,
+        );
+        assert_eq!(
+            extract_html_detail_author(&dirty_span, Some(".author")).as_deref(),
+            Some("Aravind_S")
+        );
     }
 }
