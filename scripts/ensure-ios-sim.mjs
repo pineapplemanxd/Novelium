@@ -41,9 +41,14 @@ function ensureIosSimulatorBooted() {
       iosDevices.find((d) => d.state === "Booted") ||
       iosDevices[0];
 
-    // Also ensure the default first simulator (which `tauri ios dev` picks when no
-    // device name is passed) is booted so `xcrun simctl install <udid>` never fails
-    // with exit code 149 (Unable to lookup in current state: Shutdown).
+    // Update Simulator.app's CurrentDeviceUDID preference BEFORE opening Simulator.app
+    // so Simulator.app does not shut down the target simulator in favor of a stale UDID.
+    spawnSync(
+      "defaults",
+      ["write", "com.apple.iphonesimulator", "CurrentDeviceUDID", target.udid],
+      { stdio: "ignore" },
+    );
+
     const toBoot = [target];
     if (iosDevices[0] && iosDevices[0].udid !== target.udid) {
       toBoot.push(iosDevices[0]);
