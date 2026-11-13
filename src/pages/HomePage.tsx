@@ -141,21 +141,36 @@ export const HomePage: React.FC<HomePageProps> = ({
   );
 
   return (
-    <div className="p-4 sm:p-6 max-w-[1440px] mx-auto space-y-8">
+    <div className="px-3.5 py-4 sm:p-6 max-w-[1440px] mx-auto space-y-6 sm:space-y-8">
       {/* Header + Stats Strip */}
-      <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight text-[var(--text-primary)]">
-            Welcome back to Novelium
-          </h1>
-          <p className="text-sm text-[var(--text-secondary)] mt-0.5">
-            Your personal reading studio across online public catalogs and offline books.
-          </p>
+      <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3 sm:gap-4">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h1 className="text-xl sm:text-2xl font-semibold tracking-tight text-[var(--text-primary)]">
+              Welcome back to Novelium
+            </h1>
+            <p className="text-xs sm:text-sm text-[var(--text-secondary)] mt-0.5">
+              Your personal reading studio across online public catalogs and offline books.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() =>
+              loadDashboard().then((res) => {
+                if (res.ok) loadOnlineFeeds(res.data, true);
+              })
+            }
+            disabled={loadingFeeds}
+            className="lg:hidden inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[var(--text-secondary)] shrink-0"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${loadingFeeds ? "animate-spin" : ""}`} />
+            Refresh
+          </button>
         </div>
 
         <div className="flex flex-wrap items-center gap-3">
           {stats && (
-            <div className="flex items-center gap-4 px-4 py-2.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)]">
+            <div className="w-full sm:w-auto flex items-center justify-around sm:justify-start gap-3 sm:gap-4 px-3.5 sm:px-4 py-2.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)]">
               <div className="flex items-center gap-2">
                 <Flame className="w-4 h-4 text-amber-400" />
                 <div>
@@ -203,7 +218,7 @@ export const HomePage: React.FC<HomePageProps> = ({
               })
             }
             disabled={loadingFeeds}
-            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium border border-[var(--border-subtle)] bg-[var(--bg-surface)] hover:bg-[var(--bg-elevated)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
+            className="hidden lg:inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium border border-[var(--border-subtle)] bg-[var(--bg-surface)] hover:bg-[var(--bg-elevated)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${loadingFeeds ? "animate-spin" : ""}`} />
             Refresh

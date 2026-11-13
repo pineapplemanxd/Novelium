@@ -262,18 +262,18 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
   };
 
   return (
-    <div className="p-4 sm:p-6 max-w-5xl mx-auto space-y-6">
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+    <div className="px-3.5 py-4 sm:p-6 max-w-5xl mx-auto space-y-4 sm:space-y-6">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 sm:gap-3">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Settings</h1>
-          <p className="text-sm text-[var(--text-secondary)] mt-0.5">
+          <h1 className="text-xl sm:text-2xl font-semibold tracking-tight">Settings</h1>
+          <p className="text-xs sm:text-sm text-[var(--text-secondary)] mt-0.5">
             Customize Novelium’s interface, reader typography, downloads, sources, and backups.
           </p>
         </div>
         <button
           type="button"
           onClick={handleResetSettings}
-          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs border border-[var(--border-subtle)] bg-[var(--bg-surface)] hover:bg-[var(--bg-elevated)] text-[var(--text-secondary)]"
+          className="self-start sm:self-auto inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs border border-[var(--border-subtle)] bg-[var(--bg-surface)] hover:bg-[var(--bg-elevated)] text-[var(--text-secondary)]"
         >
           <RotateCcw className="w-3.5 h-3.5" />
           Reset Defaults
@@ -281,7 +281,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
       </div>
 
       {/* Category Tabs */}
-      <div className="flex flex-wrap gap-1.5 border-b border-[var(--border-subtle)] pb-3">
+      <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar sm:flex-wrap border-b border-[var(--border-subtle)] pb-2.5">
         {(
           [
             ["appearance", "Appearance", Palette],
@@ -296,7 +296,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
             key={id}
             type="button"
             onClick={() => setTab(id)}
-            className={`inline-flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-medium transition-colors ${
+            className={`inline-flex items-center gap-1.5 sm:gap-2 px-3 sm:px-3.5 py-2 rounded-lg text-xs font-medium whitespace-nowrap shrink-0 transition-colors ${
               tab === id
                 ? "text-white"
                 : "bg-[var(--bg-surface)] text-[var(--text-secondary)] border border-[var(--border-subtle)] hover:text-[var(--text-primary)]"
@@ -311,7 +311,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
 
       {/* Appearance */}
       {tab === "appearance" && (
-        <div className="space-y-6 rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-6">
+        <div className="space-y-6 rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-4 sm:p-6">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
             <div className="space-y-2">
               <label className="text-xs font-semibold uppercase tracking-wider text-[var(--text-muted)]">

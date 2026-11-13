@@ -340,7 +340,10 @@ export function App() {
   };
 
   return (
-    <div className="h-[100dvh] w-screen flex overflow-hidden bg-[var(--bg-app)] text-[var(--text-primary)]">
+    <div
+      style={{ height: "var(--app-height, 100dvh)" }}
+      className="w-screen flex overflow-hidden bg-[var(--bg-app)] text-[var(--text-primary)]"
+    >
       {/* Tablet Portrait Overlay Backdrop */}
       {isTabletOverlay && sidebarOpen && (
         <div
@@ -448,8 +451,10 @@ export function App() {
         {/* Top Bar with macOS Drag Region & Global Search */}
         <header
           data-tauri-drag-region={IS_MAC_DESKTOP ? "deep" : undefined}
-          className={`${IS_MAC_DESKTOP ? "macos-drag" : ""} shrink-0 px-3 sm:px-4 border-b border-[var(--border-subtle)] bg-[var(--bg-app)]/90 backdrop-blur-md flex items-center justify-between gap-2 sm:gap-4 ${
-            IS_IOS ? "pt-[var(--safe-top)] min-h-[3.25rem]" : "h-12"
+          className={`${IS_MAC_DESKTOP ? "macos-drag" : ""} shrink-0 px-3 sm:px-4 border-b border-[var(--border-subtle)] bg-[var(--bg-app)]/95 backdrop-blur-md flex items-center justify-between gap-2 sm:gap-4 ${
+            IS_IOS || isPhone
+              ? "pt-[var(--safe-top)] h-[calc(3.25rem+var(--safe-top))]"
+              : "h-12"
           } ${IS_MAC_DESKTOP && !sidebarOpen ? "pl-20" : ""}`}
         >
           <div className="macos-no-drag flex items-center gap-2">
@@ -597,7 +602,7 @@ export function App() {
         {isPhone && (
           <nav
             aria-label="Primary Navigation"
-            className="shrink-0 border-t border-[var(--border-subtle)] bg-[var(--bg-sidebar)]/95 backdrop-blur-md grid grid-cols-5 pb-[var(--safe-bottom)]"
+            className="shrink-0 border-t border-[var(--border-subtle)] bg-[var(--bg-sidebar)]/98 backdrop-blur-xl grid grid-cols-5 pt-1 pb-[max(var(--safe-bottom),0.5rem)] z-30"
           >
             {phonePrimaryNav.map((item) => {
               const Icon = item.icon;

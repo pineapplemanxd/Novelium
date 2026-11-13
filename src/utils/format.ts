@@ -81,12 +81,32 @@ export function getDeviceLayout(width: number, isIos = IS_IOS): DeviceLayout {
 }
 
 export function useDeviceLayout(): DeviceLayout {
+  const computeWidth = () => {
+    if (typeof window === "undefined") return 1280;
+    if (IS_IOS && window.screen?.width && window.screen.width > 0) {
+      return Math.min(window.innerWidth || window.screen.width, window.screen.width);
+    }
+    return window.innerWidth;
+  };
+
   const [layout, setLayout] = useState<DeviceLayout>(() =>
-    getDeviceLayout(typeof window !== "undefined" ? window.innerWidth : 1280),
+    getDeviceLayout(computeWidth()),
   );
 
   useEffect(() => {
-    const update = () => setLayout(getDeviceLayout(window.innerWidth));
+    if (IS_IOS && typeof document !== "undefined") {
+      const rootStyle = document.documentElement.style;
+      if (!rootStyle.getPropertyValue("--native-safe-top")) {
+        rootStyle.setProperty("--native-safe-top", computeWidth() < 768 ? "59px" : "24px");
+      }
+      if (!rootStyle.getPropertyValue("--native-safe-bottom")) {
+        rootStyle.setProperty("--native-safe-bottom", computeWidth() < 768 ? "34px" : "20px");
+      }
+      if (!rootStyle.getPropertyValue("--app-height") && window.screen?.height) {
+        rootStyle.setProperty("--app-height", `${window.screen.height}px`);
+      }
+    }
+    const update = () => setLayout(getDeviceLayout(computeWidth()));
     update();
     window.addEventListener("resize", update);
     return () => window.removeEventListener("resize", update);

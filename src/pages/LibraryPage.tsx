@@ -179,12 +179,12 @@ export const LibraryPage: React.FC<LibraryPageProps> = ({
   };
 
   return (
-    <div className="p-4 sm:p-6 max-w-[1440px] mx-auto space-y-5">
+    <div className="px-3.5 py-4 sm:p-6 max-w-[1440px] mx-auto space-y-4 sm:space-y-5">
       {/* Header */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 sm:gap-4">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Personal Library</h1>
-          <p className="text-sm text-[var(--text-secondary)] mt-0.5">
+          <h1 className="text-xl sm:text-2xl font-semibold tracking-tight">Personal Library</h1>
+          <p className="text-xs sm:text-sm text-[var(--text-secondary)] mt-0.5">
             {items.length} novel{items.length === 1 ? "" : "s"} organized across shelves and offline storage.
           </p>
         </div>
@@ -214,8 +214,8 @@ export const LibraryPage: React.FC<LibraryPageProps> = ({
       </div>
 
       {/* Shelves & Controls */}
-      <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 pb-3 border-b border-[var(--border-subtle)]">
-        <div className="flex flex-wrap items-center gap-1.5">
+      <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-2.5 pb-3 border-b border-[var(--border-subtle)]">
+        <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-0.5 sm:flex-wrap">
           {(
             [
               ["all", "All"],
@@ -233,7 +233,7 @@ export const LibraryPage: React.FC<LibraryPageProps> = ({
                 setSelectedCollection(null);
                 setShelf(key);
               }}
-              className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+              className={`px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap shrink-0 transition-colors ${
                 !selectedCollection && shelf === key
                   ? "text-white"
                   : "bg-[var(--bg-surface)] text-[var(--text-secondary)] border border-[var(--border-subtle)] hover:text-[var(--text-primary)]"

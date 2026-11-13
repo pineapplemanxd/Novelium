@@ -332,8 +332,8 @@ export const NovelDetailsPage: React.FC<NovelDetailsPageProps> = ({
       </div>
 
       {/* Hero Section */}
-      <div className="flex flex-col md:flex-row gap-5 sm:gap-6 p-4 sm:p-6 rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-surface)]">
-        <div className="w-36 sm:w-48 md:w-52 aspect-[2/3] rounded-xl overflow-hidden shadow-lg shrink-0 mx-auto md:mx-0">
+      <div className="flex flex-col md:flex-row gap-4 sm:gap-6 p-4 sm:p-6 rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-surface)]">
+        <div className="w-28 sm:w-44 md:w-52 aspect-[2/3] rounded-xl overflow-hidden shadow-lg shrink-0 mx-auto md:mx-0">
           <CoverImage
             title={novel.title}
             author={novel.author}
@@ -345,9 +345,9 @@ export const NovelDetailsPage: React.FC<NovelDetailsPageProps> = ({
           />
         </div>
 
-        <div className="flex-1 min-w-0 space-y-4">
-          <div>
-            <div className="flex flex-wrap items-center gap-2 text-xs mb-2">
+        <div className="flex-1 min-w-0 space-y-3 sm:space-y-4">
+          <div className="text-center md:text-left">
+            <div className="flex flex-wrap items-center justify-center md:justify-start gap-1.5 sm:gap-2 text-xs mb-2">
               <span className="px-2 py-0.5 rounded-md bg-[var(--accent-soft)] text-[var(--accent-hover)] font-medium border border-[var(--accent-border)]">
                 {sourceLabel(novel.source_id)}
               </span>

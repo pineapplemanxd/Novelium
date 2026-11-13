@@ -149,13 +149,13 @@ export const DiscoverPage: React.FC<DiscoverPageProps> = ({
   );
 
   return (
-    <div className="p-4 sm:p-6 max-w-[1440px] mx-auto space-y-5">
-      <div className="flex flex-col md:flex-row md:items-end justify-between gap-4">
+    <div className="px-3.5 py-4 sm:p-6 max-w-[1440px] mx-auto space-y-4 sm:space-y-5">
+      <div className="flex flex-col md:flex-row md:items-end justify-between gap-3 sm:gap-4">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">
+          <h1 className="text-xl sm:text-2xl font-semibold tracking-tight">
             {isBooksMode ? "Books" : "Discover Novels"}
           </h1>
-          <p className="text-sm text-[var(--text-secondary)] mt-0.5">
+          <p className="text-xs sm:text-sm text-[var(--text-secondary)] mt-0.5">
             {isBooksMode
               ? `Open-access & public-domain books across ${enabledSources.length} legal catalog${enabledSources.length === 1 ? "" : "s"}`
               : `Search and browse across ${enabledSources.length} enabled source${enabledSources.length === 1 ? "" : "s"}`}
@@ -191,12 +191,12 @@ export const DiscoverPage: React.FC<DiscoverPageProps> = ({
       </div>
 
       {/* Source Tabs + Sort + Status Filters */}
-      <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-[var(--border-subtle)]">
-        <div className="flex flex-wrap items-center gap-1.5">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 pb-3 border-b border-[var(--border-subtle)]">
+        <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-0.5 sm:flex-wrap">
           <button
             type="button"
             onClick={() => setSelectedSource("all")}
-            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap shrink-0 transition-colors ${
               selectedSource === "all"
                 ? "text-white"
                 : "bg-[var(--bg-surface)] text-[var(--text-secondary)] border border-[var(--border-subtle)] hover:text-[var(--text-primary)]"
@@ -211,7 +211,7 @@ export const DiscoverPage: React.FC<DiscoverPageProps> = ({
               key={src.id}
               type="button"
               onClick={() => setSelectedSource(src.id)}
-              className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+              className={`px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap shrink-0 transition-colors ${
                 selectedSource === src.id
                   ? "text-white"
                   : "bg-[var(--bg-surface)] text-[var(--text-secondary)] border border-[var(--border-subtle)] hover:text-[var(--text-primary)]"
@@ -223,7 +223,7 @@ export const DiscoverPage: React.FC<DiscoverPageProps> = ({
           ))}
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex items-center gap-2 overflow-x-auto no-scrollbar">
           <SlidersHorizontal className="w-3.5 h-3.5 text-[var(--text-muted)] hidden sm:block" />
           <select
             aria-label="Sort novels"

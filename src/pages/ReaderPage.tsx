@@ -1466,8 +1466,9 @@ export const ReaderPage: React.FC<ReaderPageProps> = ({
 
   return (
     <div
-      className="relative h-[100dvh] w-screen overflow-hidden flex flex-col select-text transition-colors duration-200"
+      className="relative w-screen overflow-hidden flex flex-col select-text transition-colors duration-200"
       style={{
+        height: "var(--app-height, 100dvh)",
         backgroundColor: themePalette.bg,
         color: themePalette.fg,
         ["--reader-accent" as string]: themePalette.accent,
@@ -1488,7 +1489,7 @@ export const ReaderPage: React.FC<ReaderPageProps> = ({
       <header
         data-tauri-drag-region={!IS_IOS ? "deep" : undefined}
         className={`${IS_MAC_DESKTOP ? "macos-drag pl-20" : ""} ${
-          IS_IOS ? "pt-[var(--safe-top)] min-h-[3.25rem]" : "h-13"
+          IS_IOS ? "pt-[var(--safe-top)] h-[calc(3.25rem+var(--safe-top))]" : "h-13"
         } shrink-0 px-3 sm:px-4 flex items-center justify-between border-b transition-all duration-200 z-30 ${
           hudVisible && !zenMode
             ? "opacity-100 translate-y-0"
