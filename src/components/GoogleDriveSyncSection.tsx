@@ -216,6 +216,7 @@ export const GoogleDriveSyncSection: React.FC<GoogleDriveSyncSectionProps> = ({
         `Verified Drive folder "${verified.folder_name || verified.folder_id}"`,
       );
     } catch (e) {
+      api.getGdriveSyncStatus().then(applyStatusToForm).catch(() => {});
       onNotify(extractErrorMessage(e), true);
     } finally {
       setVerifying(false);
@@ -238,6 +239,7 @@ export const GoogleDriveSyncSection: React.FC<GoogleDriveSyncSectionProps> = ({
         `Synced: ${report.novels_merged} books merged, ${report.books_downloaded} downloaded, ${report.books_uploaded} uploaded`,
       );
     } catch (e) {
+      api.getGdriveSyncStatus().then(applyStatusToForm).catch(() => {});
       onNotify(extractErrorMessage(e), true);
     } finally {
       setSyncing(false);

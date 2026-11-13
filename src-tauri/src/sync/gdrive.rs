@@ -29,10 +29,13 @@ use crate::sync::{
 const GOOGLE_AUTH_ENDPOINT: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const GOOGLE_TOKEN_ENDPOINT: &str = "https://oauth2.googleapis.com/token";
 const GOOGLE_USERINFO_ENDPOINT: &str = "https://www.googleapis.com/oauth2/v2/userinfo";
+const GOOGLE_DRIVE_ABOUT_ENDPOINT: &str = "https://www.googleapis.com/drive/v3/about";
 const GOOGLE_DRIVE_FILES_ENDPOINT: &str = "https://www.googleapis.com/drive/v3/files";
 const GOOGLE_DRIVE_UPLOAD_ENDPOINT: &str = "https://www.googleapis.com/upload/drive/v3/files";
-const GOOGLE_OAUTH_SCOPES: &str =
-    "https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/userinfo.email";
+// Request ONLY the `drive` scope (without `userinfo.email` or `include_granted_scopes=true`)
+// so Google OAuth does not issue a partial `userinfo.email`-only token that fails with
+// 403 ACCESS_TOKEN_SCOPE_INSUFFICIENT on user-created Drive folders.
+const GOOGLE_OAUTH_SCOPES: &str = "https://www.googleapis.com/auth/drive";
 
 const LIBRARY_BUNDLE_FILENAME: &str = "novelium-library.json";
 const BOOKS_SUBFOLDER_NAME: &str = "books";
@@ -46,6 +49,8 @@ struct GoogleTokenResponse {
     expires_in: Option<i64>,
     #[serde(default)]
     refresh_token: Option<String>,
+    #[serde(default)]
+    scope: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -60,6 +65,27 @@ struct GoogleTokenErrorResponse {
 struct GoogleUserInfo {
     #[serde(default)]
     email: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DriveAboutResponse {
+    #[serde(default)]
+    user: Option<DriveAboutUser>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DriveAboutUser {
+    #[serde(default)]
+    email_address: Option<String>,
+}
+
+fn has_granted_drive_scope(scope_str: &str) -> bool {
+    scope_str.split_whitespace().any(|s| {
+        s == "https://www.googleapis.com/auth/drive"
+            || s == "https://www.googleapis.com/auth/drive.file"
+            || s.ends_with("/auth/drive")
+    })
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -112,7 +138,6 @@ fn build_google_auth_url(
         .append_pair("scope", GOOGLE_OAUTH_SCOPES)
         .append_pair("access_type", "offline")
         .append_pair("prompt", "consent")
-        .append_pair("include_granted_scopes", "true")
         .append_pair("code_challenge", code_challenge)
         .append_pair("code_challenge_method", "S256")
         .append_pair("state", state);
@@ -174,12 +199,14 @@ fn parse_oauth_callback_input(raw_input: &str, expected_state: Option<&str>) -> 
         })?;
         let mut code = None;
         let mut state = None;
+        let mut scope = None;
         let mut err = None;
         let mut err_desc = None;
         for (k, v) in parsed.query_pairs() {
             match k.as_ref() {
                 "code" => code = Some(v.into_owned()),
                 "state" => state = Some(v.into_owned()),
+                "scope" => scope = Some(v.into_owned()),
                 "error" => err = Some(v.into_owned()),
                 "error_description" => err_desc = Some(v.into_owned()),
                 _ => {}
@@ -195,6 +222,13 @@ fn parse_oauth_callback_input(raw_input: &str, expected_state: Option<&str>) -> 
             if state.as_deref() != Some(expected) {
                 return Err(AppError::InvalidInput(
                     "OAuth state mismatch; please restart connecting Google Drive.".into(),
+                ));
+            }
+        }
+        if let Some(ref granted_scope) = scope {
+            if !granted_scope.trim().is_empty() && !has_granted_drive_scope(granted_scope) {
+                return Err(AppError::InvalidInput(
+                    "Google Drive permission was not checked on Google's sign-in screen. Please click 'Connect Google Drive' again and check the box 'See, edit, create, and delete all of your Google Drive files' before clicking Continue.".into(),
                 ));
             }
         }
@@ -347,6 +381,24 @@ async fn ensure_valid_access_token(
 }
 
 async fn fetch_user_email(http: &reqwest::Client, access_token: &str) -> Option<String> {
+    if let Ok(resp) = http
+        .get(GOOGLE_DRIVE_ABOUT_ENDPOINT)
+        .query(&[("fields", "user(emailAddress)")])
+        .bearer_auth(access_token)
+        .send()
+        .await
+    {
+        if resp.status().is_success() {
+            if let Ok(about) = resp.json::<DriveAboutResponse>().await {
+                if let Some(email) = about.user.and_then(|u| u.email_address) {
+                    if !email.trim().is_empty() {
+                        return Some(email);
+                    }
+                }
+            }
+        }
+    }
+
     let resp = http
         .get(GOOGLE_USERINFO_ENDPOINT)
         .bearer_auth(access_token)
@@ -357,6 +409,28 @@ async fn fetch_user_email(http: &reqwest::Client, access_token: &str) -> Option<
         return None;
     }
     resp.json::<GoogleUserInfo>().await.ok()?.email
+}
+
+fn check_insufficient_scope_error(
+    status: reqwest::StatusCode,
+    body: &str,
+    cfg: &mut GoogleDriveSyncConfig,
+    db: &Database,
+) -> Option<AppError> {
+    if status.as_u16() == 403
+        && (body.contains("ACCESS_TOKEN_SCOPE_INSUFFICIENT")
+            || body.contains("insufficientPermissions")
+            || body.contains("Request had insufficient authentication scopes"))
+    {
+        cfg.access_token = None;
+        cfg.refresh_token = None;
+        cfg.token_expires_at = None;
+        let _ = db.save_gdrive_config(cfg);
+        return Some(AppError::InvalidInput(
+            "Google sign-in did not grant Google Drive access (403 Insufficient Permission). Please click 'Connect Google Drive' again and check the box 'See, edit, create, and delete all of your Google Drive files' on Google's consent screen.".into(),
+        ));
+    }
+    None
 }
 
 async fn verify_drive_folder(
@@ -386,6 +460,9 @@ async fn verify_drive_folder(
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
+            if let Some(scope_err) = check_insufficient_scope_error(status, &body, cfg, db) {
+                return Err(scope_err);
+            }
             return Err(AppError::Source {
                 source_id: "gdrive".into(),
                 message: format!(
@@ -663,6 +740,14 @@ async fn finish_oauth_exchange(
         input.redirect_uri,
     )
     .await?;
+
+    if let Some(ref granted_scope) = tok.scope {
+        if !granted_scope.trim().is_empty() && !has_granted_drive_scope(granted_scope) {
+            return Err(AppError::InvalidInput(
+                "Google Drive permission was not checked on Google's sign-in screen. Please click 'Connect Google Drive' again and check the box 'See, edit, create, and delete all of your Google Drive files' before clicking Continue.".into(),
+            ));
+        }
+    }
 
     let email = fetch_user_email(&coordinator.http, &tok.access_token).await;
 
@@ -1188,12 +1273,18 @@ mod tests {
 
     #[test]
     fn test_parse_oauth_callback_input_handles_redirect_url_and_errors() {
-        let ok_url = "http://127.0.0.1:51234/oauth2callback?code=4/0AX4XfWh&state=abc123&scope=drive";
+        let ok_url = "http://127.0.0.1:51234/oauth2callback?code=4/0AX4XfWh&state=abc123&scope=https://www.googleapis.com/auth/drive";
         assert_eq!(
             parse_oauth_callback_input(ok_url, Some("abc123")).unwrap(),
             "4/0AX4XfWh"
         );
         assert!(parse_oauth_callback_input(ok_url, Some("wrong-state")).is_err());
+
+        let missing_drive_scope = "http://127.0.0.1:51234/oauth2callback?code=4/0AX4XfWh&state=abc123&scope=email+openid";
+        let scope_err = parse_oauth_callback_input(missing_drive_scope, Some("abc123"))
+            .unwrap_err()
+            .to_string();
+        assert!(scope_err.contains("Google Drive permission was not checked"));
 
         let denied = "/oauth2callback?error=access_denied&error_description=User+denied+access";
         let err = parse_oauth_callback_input(denied, None).unwrap_err().to_string();
